@@ -93,6 +93,11 @@ std::string Caps::to_string() const {
     flag("EGL_KHR_fence_sync", fence_sync);
     flag("EGL_ANDROID_native_fence_sync", native_fence_sync);
     flag("EGL_KHR_wait_sync", wait_sync);
+    out += fmt("\nGL '{}' by '{}' ({})", gl_renderer, gl_vendor, gl_version);
+    flag("GL_OES_EGL_image", gl_egl_image);
+    flag("GL_OES_EGL_image_external", gl_egl_image_external);
+    flag("glEGLImageTargetRenderbufferStorageOES", gl_renderbuffer_from_image);
+    flag("glEGLImageTargetTexture2DOES", gl_texture_from_image);
     return out;
 }
 
@@ -242,9 +247,17 @@ Result<Display> Display::create(const gbm::Device& device) {
     out.context_ = context;
 
     TRY(out.make_current());
+    out.query_gl_caps();
 
-    LOG_INFO("EGL {} ready on '{}' -- renderer '{}'", caps.version, caps.vendor,
-             out.gl_renderer());
+    LOG_INFO("EGL {} ready on '{}' -- GL renderer '{}' ({})", caps.version, caps.vendor,
+             caps.gl_renderer, caps.gl_version);
+    if (! caps.can_render_into_imported_image()) {
+        // 不是致命错误：这一层只做导入，绑成渲染目标是 render 层的事。
+        // 但这条信息决定了上层能不能用 GL 画，必须说出来。
+        LOG_WARN("this GL implementation cannot bind an imported EGLImage as a render "
+                 "target (GL_OES_EGL_image is {}); CPU-drawn buffers still work",
+                 caps.gl_egl_image ? "present but neither entry point resolved" : "absent");
+    }
     if (! caps.dmabuf_import_modifiers) {
         LOG_WARN("EGL_EXT_image_dma_buf_import_modifiers is absent; only linear buffers can be "
                  "imported reliably");
@@ -341,6 +354,29 @@ Result<Image> Display::import_dmabuf(const drm::DmabufDesc& desc) const {
 
     LOG_DEBUG("imported dmabuf as EGLImage: {}", desc.to_string());
     return Ok(Image(display_, image));
+}
+
+void Display::query_gl_caps() {
+    // 必须在上下文 current 之后调用，否则 glGetString 全返回 nullptr。
+    auto str = [](GLenum name) -> std::string {
+        const auto* value = glGetString(name);
+        return value != nullptr ? std::string(reinterpret_cast<const char*>(value))
+                                : std::string("<none>");
+    };
+    caps_.gl_vendor = str(GL_VENDOR);
+    caps_.gl_renderer = str(GL_RENDERER);
+    caps_.gl_version = str(GL_VERSION);
+    caps_.glsl_version = str(GL_SHADING_LANGUAGE_VERSION);
+
+    const std::string gl_exts = str(GL_EXTENSIONS);
+    caps_.gl_egl_image = has_extension(gl_exts.c_str(), "GL_OES_EGL_image");
+    caps_.gl_egl_image_external = has_extension(gl_exts.c_str(), "GL_OES_EGL_image_external");
+
+    // 扩展字符串在，入口点也未必拿得到（反过来同样成立）。两个都查，
+    // 且都只当作\"值得一试\"的信号 —— 唯一的判据是真建一次 FBO。
+    caps_.gl_renderbuffer_from_image =
+        eglGetProcAddress("glEGLImageTargetRenderbufferStorageOES") != nullptr;
+    caps_.gl_texture_from_image = eglGetProcAddress("glEGLImageTargetTexture2DOES") != nullptr;
 }
 
 std::string Display::gl_renderer() const {

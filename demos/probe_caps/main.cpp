@@ -39,9 +39,9 @@
 #include "mw/core/log.hpp"
 #include "mw/drm/device.hpp"
 #include "mw/drm/prime.hpp"
-#include "mw/egl/display.hpp"
-#include "mw/gbm/device.hpp"
 #include "mw/render/buffer_source.hpp"
+#include "mw/render/gl_node.hpp"
+#include "mw/render/target.hpp"
 
 using namespace mw;
 
@@ -124,6 +124,16 @@ class Report {
         return highest;
     }
 
+    int degraded_count() const {
+        int count = 0;
+        for (const auto& gate : gates_) {
+            if (gate.verdict == Verdict::Degraded) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
     bool any_blocked() const {
         for (const auto& gate : gates_) {
             if (gate.verdict == Verdict::Blocked) {
@@ -164,7 +174,8 @@ void check_step1(Report& report, const drm::Device& device) {
                "without it, stride-related addfb2 failures give no diagnostic hint");
 }
 
-void check_step2(Report& report, const drm::Device& device, const std::string& render_node) {
+void check_step2(Report& report, const drm::Device& device,
+                 const render::GlNode* gl_node) {
     // ---- PRIME ----
     const auto& caps = device.caps();
     const bool prime_ok = caps.prime_import && caps.prime_export;
@@ -179,48 +190,81 @@ void check_step2(Report& report, const drm::Device& device, const std::string& r
                                      : "only the modifier-less addfb2 path is available",
                "modifier negotiation degenerates to linear-only");
 
-    // ---- 分配路径。这两个只能真做一次。 ----
+    // ---- 显示侧分配。只能真做一次。 ----
     drm::HandleCache cache(device.fd());
-    const auto probes = render::probe_buffer_sources(device.fd(), render_node, drm::Size{256, 256});
-    for (const auto& probe : probes) {
-        const bool is_render = probe.kind == render::SourceKind::RenderDevice;
-        report.add(2, fmt("{} allocation path", render::to_string(probe.kind)),
-                   probe.usable ? Verdict::Pass
-                                : (is_render ? Verdict::Degraded : Verdict::Blocked),
-                   probe.detail,
-                   is_render ? "GPU-allocated scanout is unavailable; fall back to allocating "
-                               "on the display device"
-                             : "the display device cannot allocate its own scanout buffers");
+    auto scanout_source = render::make_scanout_device_source(device.fd(), cache);
+    render::AllocRequest request;
+    request.size = drm::Size{256, 256};
+    request.format = drm::Format{DRM_FORMAT_XRGB8888};
+
+    if (! scanout_source) {
+        report.add(2, "scanout-device allocation path", Verdict::Blocked,
+                   scanout_source.error().message,
+                   "the display device cannot allocate its own scanout buffers");
+    } else {
+        auto buffer = scanout_source.value()->allocate(request);
+        report.add(2, "scanout-device allocation path",
+                   buffer ? Verdict::Pass : Verdict::Blocked,
+                   buffer ? buffer.value().to_string() : buffer.error().message,
+                   "the display device cannot allocate its own scanout buffers");
     }
 
-    // ---- GBM / EGL ----
-    if (render_node.empty()) {
-        report.add(2, "GBM device", Verdict::Skipped, "no render node found");
-        report.add(2, "EGL dmabuf import", Verdict::Skipped, "no render node found");
+    // ---- GL 宿主 ----
+    if (gl_node == nullptr) {
+        report.add(2, "GL host node", Verdict::Blocked,
+                   "no node could bring up GBM + EGL",
+                   "only CPU-drawn content can be shown");
+        report.add(2, "buffers allocated by the display, drawn by GL", Verdict::Skipped,
+                   "no GL host");
+        report.add(2, "buffers allocated by the GL host, scanned by the display",
+                   Verdict::Skipped, "no GL host");
         return;
     }
 
-    auto gbm_device = gbm::Device::open(render_node);
-    if (! gbm_device) {
-        report.add(2, "GBM device", Verdict::Blocked, gbm_device.error().message,
-                   "GPU rendering is unavailable; only CPU-drawn content can be shown");
-        report.add(2, "EGL dmabuf import", Verdict::Skipped, "no GBM device");
-        return;
-    }
-    report.add(2, "GBM device", Verdict::Pass,
-               fmt("backend '{}' on {}", gbm_device.value().backend_name(), render_node));
+    const bool software = gl_node->looks_like_software();
+    report.add(2, "GL host node", software ? Verdict::Degraded : Verdict::Pass,
+               fmt("{} -- EGL {} renderer '{}'", gl_node->path, gl_node->egl_version,
+                   gl_node->gl_renderer),
+               "the GL stack fell back to a software rasteriser; it works but produces no "
+               "hardware-usable allocations and is orders of magnitude slower. Check that the "
+               "node actually driving the GPU has a matching user-mode driver installed");
 
-    auto display = egl::Display::create(gbm_device.value());
-    if (! display) {
-        report.add(2, "EGL dmabuf import", Verdict::Blocked, display.error().message,
-                   "GPU rendering into shareable buffers is unavailable");
-        return;
+    // ---- 两个方向，都测，都不预设哪个是主路 ----
+    //
+    // 走得通的方向随硬件与驱动成熟度变化。把任何一个写死进代码，就是把
+    // 当下这块板子的状态当成了架构。见 render/gl_node.hpp。
+    report.add(2, "buffers allocated by the display, drawn by GL",
+               gl_node->renders_into_imported
+                   ? (gl_node->attach_kind == render::AttachKind::Renderbuffer
+                          ? Verdict::Pass
+                          : Verdict::Degraded)
+                   : Verdict::Blocked,
+               gl_node->renders_into_imported
+                   ? fmt("an imported dmabuf can be drawn into via {}",
+                         render::to_string(gl_node->attach_kind))
+                   : gl_node->detail,
+               "the renderbuffer path is unavailable or GL cannot draw into foreign memory at "
+               "all; without this direction GL output cannot reach the display");
+
+    Verdict export_verdict = Verdict::Blocked;
+    std::string export_detail;
+    if (gl_node->scanout_accepted_by_kms) {
+        export_verdict = Verdict::Pass;
+        export_detail = "the display device imports and scans out GL-host allocations";
+    } else if (gl_node->allocates_scanout) {
+        export_verdict = Verdict::Degraded;
+        export_detail = "the GL host allocates scanout-capable memory but the display device "
+                        "refuses to import it";
+    } else {
+        export_detail = "the GL host cannot allocate scanout-capable memory";
     }
-    const auto& egl_caps = display.value().caps();
-    report.add(2, "EGL dmabuf import", Verdict::Pass,
-               fmt("{} -- renderer '{}'", egl_caps.vendor, display.value().gl_renderer()));
+    report.add(2, "buffers allocated by the GL host, scanned by the display", export_verdict,
+               export_detail,
+               "modifier negotiation has no effect while this direction is closed: only the "
+               "display device's own linear allocations reach the screen");
+
     report.add(2, "EGL modifier-aware import",
-               egl_caps.dmabuf_import_modifiers ? Verdict::Pass : Verdict::Degraded,
+               gl_node->egl_import_modifiers ? Verdict::Pass : Verdict::Degraded,
                "EGL_EXT_image_dma_buf_import_modifiers",
                "only linear buffers can be imported into GL reliably");
 }
@@ -257,7 +301,7 @@ void check_step5(Report& report, const drm::Device& device) {
                "modifier selection has nothing to choose from");
 }
 
-void check_step6(Report& report, const drm::Device& device, const std::string& render_node) {
+void check_step6(Report& report, const drm::Device& device, const render::GlNode* gl_node) {
     const auto& caps = device.caps();
 
     // KMS 侧的显式同步靠 sync_file，与 syncobj 无关 —— 这两件事经常被混为一谈。
@@ -267,22 +311,29 @@ void check_step6(Report& report, const drm::Device& device, const std::string& r
                    caps.prop_crtc_out_fence_ptr ? "yes" : "no"),
                "the compositor would have to block on the CPU before every commit");
 
-    if (render_node.empty()) {
-        report.add(6, "timeline syncobj (render side)", Verdict::Skipped, "no render node");
+    if (gl_node == nullptr) {
+        report.add(6, "fence export from GL", Verdict::Skipped, "no GL host");
+        report.add(6, "timeline syncobj (protocol side)", Verdict::Skipped, "no GL host");
         return;
     }
-    auto fd = UniqueFd::open(render_node.c_str(), O_RDWR | O_CLOEXEC);
-    if (! fd) {
-        report.add(6, "timeline syncobj (render side)", Verdict::Skipped,
-                   fmt("cannot open {}", render_node));
-        return;
-    }
-    uint64_t timeline = 0;
-    drmGetCap(fd.value().get(), DRM_CAP_SYNCOBJ_TIMELINE, &timeline);
-    report.add(6, "timeline syncobj (render side)",
-               timeline != 0 ? Verdict::Pass : Verdict::Blocked,
-               fmt("{} reports SYNCOBJ_TIMELINE={}", render_node, timeline),
-               "linux-drm-syncobj-v1 cannot be offered to clients");
+
+    // 合成器自己的显式同步只需要这一条：把 GL 的完成点变成一个 fence fd，
+    // 交给 plane 的 IN_FENCE_FD。不依赖 syncobj。
+    report.add(6, "fence export from GL",
+               gl_node->egl_native_fence_sync ? Verdict::Pass : Verdict::Blocked,
+               fmt("EGL_ANDROID_native_fence_sync on {}", gl_node->path),
+               "the compositor cannot turn GPU completion into a fence fd and would have to "
+               "block on glFinish before every commit");
+
+    // 这一条**必须问实际承载渲染的节点**。问错节点会得到一个与本项目无关的
+    // 答案，而它决定的是能不能把 linux-drm-syncobj-v1 提供给客户端。
+    report.add(6, "timeline syncobj (protocol side)",
+               gl_node->syncobj_timeline ? Verdict::Pass : Verdict::Degraded,
+               fmt("{} reports SYNCOBJ={} SYNCOBJ_TIMELINE={}", gl_node->path,
+                   gl_node->syncobj ? 1 : 0, gl_node->syncobj_timeline ? 1 : 0),
+               "linux-drm-syncobj-v1 cannot be offered to clients; the compositor's own "
+               "explicit sync still works through sync_file, and clients fall back to "
+               "implicit sync");
 }
 
 void check_step7(Report& report, const drm::Device& device) {
@@ -303,7 +354,7 @@ void check_step7(Report& report, const drm::Device& device) {
 void print_usage(const char* argv0) {
     std::printf("usage: %s [options]\n", argv0);
     std::printf("  -d <path>   KMS device (default: first with a connected display)\n");
-    std::printf("  -r <path>   render node (default: the paired one)\n");
+    std::printf("  -r <path>   force the GL host node (default: probe every node)\n");
     std::printf("  -s <n>      only check the gates for step n\n");
     std::printf("  -q          terse output\n");
     std::printf("  -h          this help\n");
@@ -354,27 +405,57 @@ int main(int argc, char** argv) {
     }
     const drm::Device device = std::move(device_result).value();
 
-    if (render_node.empty()) {
-        if (const auto found = drm::find_render_node(device.path())) {
-            render_node = *found;
+    LOG_INFO("KMS device:  {} ({})", device.path(), device.caps().driver_name);
+
+    // 哪个节点能跑 GL 是**实测结论**，不是从设备元数据推出来的。
+    // 后面 step 2 和 step 6 的好几条闸门都取决于它，问错节点会一路带偏。
+    // 见 render/gl_node.hpp。
+    render::GlNodeProbe gl_probe;
+    gl_probe.kms_fd = device.fd();
+    gl_probe.kms_path = device.path();
+    const std::vector<render::GlNode> gl_nodes = render::probe_gl_nodes(gl_probe);
+
+    LOG_INFO("");
+    LOG_INFO("--- GL host candidates ---");
+    for (const auto& node : gl_nodes) {
+        LOG_INFO("  {}", node.to_line());
+        if (! node.detail.empty()) {
+            LOG_INFO("        {}", node.detail);
         }
     }
 
-    LOG_INFO("KMS device:  {} ({})", device.path(), device.caps().driver_name);
-    LOG_INFO("render node: {}", render_node.empty() ? "<none>" : render_node);
+    const render::GlNode* gl_node = nullptr;
+    if (! render_node.empty()) {
+        for (const auto& node : gl_nodes) {
+            if (node.path == render_node) {
+                gl_node = &node;
+            }
+        }
+        if (gl_node == nullptr) {
+            LOG_ERROR("{} is not among the probed nodes", render_node);
+            return 1;
+        }
+        LOG_INFO("  using {} because -r said so", render_node);
+    } else {
+        gl_node = render::best_gl_node(
+            span<const render::GlNode>(gl_nodes.data(), gl_nodes.size()));
+        if (gl_node != nullptr) {
+            LOG_INFO("  picked {} (highest ranked; override with -r)", gl_node->path);
+        }
+    }
 
     Report report;
     if (only_step == 0 || only_step == 1) {
         check_step1(report, device);
     }
     if (only_step == 0 || only_step == 2) {
-        check_step2(report, device, render_node);
+        check_step2(report, device, gl_node);
     }
     if (only_step == 0 || only_step == 5) {
         check_step5(report, device);
     }
     if (only_step == 0 || only_step == 6) {
-        check_step6(report, device, render_node);
+        check_step6(report, device, gl_node);
     }
     if (only_step == 0 || only_step == 7) {
         check_step7(report, device);
@@ -385,7 +466,16 @@ int main(int argc, char** argv) {
     LOG_INFO("");
     if (only_step == 0) {
         const int highest = report.highest_clear_step();
-        LOG_INFO("every gate up to step {} is clear", highest);
+        const int degraded = report.degraded_count();
+        // "up to step N is clear" 只说明没有 BLOCK。降级项也会改变能做什么，
+        // 不一起说出来这行就是误导。
+        if (degraded == 0) {
+            LOG_INFO("every gate up to step {} is clear", highest);
+        } else {
+            LOG_INFO("no gate up to step {} is blocked, but {} gate(s) are degraded -- "
+                     "those steps work along a reduced path, see DEGRD above",
+                     highest, degraded);
+        }
         LOG_INFO("");
         LOG_INFO("BLOCK means the step cannot work at all; DEGRD means it works with a");
         LOG_INFO("reduced path. Re-run this after a kernel, driver or Mesa update -- gates");

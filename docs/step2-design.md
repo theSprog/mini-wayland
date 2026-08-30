@@ -16,9 +16,12 @@ Step 2 把像素来源换成 GPU，把 buffer 来源换成 GBM，中间多出一
 `docs/env.md` 记录的拓扑：
 
 ```
-/dev/dri/card2       vsdrm    KMS 显示节点，不能渲染
-/dev/dri/renderD128  hygpu    render node，没有 KMS
+/dev/dri/card2       vsdrm    KMS 显示节点（DPU），不能渲染
+/dev/dri/renderD130  pvr      3D 渲染节点（GPU），没有 KMS
 ```
+
+> 早先这里写的是 renderD128/hygpu。**那是错的** —— 那个节点没有对应的
+> 用户态驱动，GL 栈会退到软件光栅化。已按实测更正，见 `docs/env.md` 第二节。
 
 教科书的 GBM 上屏路径（kmscube 那一类）是：
 
@@ -234,27 +237,205 @@ fb_id 依然有效。所以 `import_as_framebuffer()` 在 addfb2 之后立刻释
 
 ---
 
-## 六、待确认
+## 六、待确认与已确认
 
--1. **模块是 SOC 构建还是普通构建。** 决定方向 A 可行性，优先级最高。
-   `grep -i hy_uvm /proc/kallsyms`。见 `TODO(soc-build)`。
-0. **哪个节点才是 GPU。** GPU 是外购的 Imagination PowerVR IP。
-   `env.md` 记 renderD128 的 driver 是 `hygpu`，而 card3 是 `pvr`
-   （Imagination 上游驱动名）。打错节点则方向 A 的全部工作落空。
-   跑 `demos/probe_render`。见 `TODO(verify-gpu-node)`。
-0.5. **GL 栈是不是 Mesa kmsro。** `vsdrm_dri.so` 以显示驱动命名是 kmsro
-   的典型特征，而 kmsro 处理 scanout buffer 的方式恰好就是方向 B。
-   若属实，含义是：方向 B 已被每个 GL 程序验证过（kmscube 能跑就是证据），
-   方向 A 反而是 Mesa 刻意避开、大概率从未被走过的路径。
-   验证：`ls -li /usr/local/lib/dri/*.so`，megadriver 会共享 inode。
-   见 `TODO(verify-kmsro)`。
+### 已确认（实测，早先的待确认项作废）
+
+- **模块是 SOC 构建。** `hy_uvm_alloc_va_and_map` / `hy_uvm_import_sgt` /
+  `amdgpu_vram_mgr_alloc_sgt` 符号存在，`CONFIG_SUPPORT_SOC` + `ALLOC_FROM_VRAM` 生效。
+- **承载 3D 的是 renderD130（`pvr`）**，`GL_RENDERER = "Hygon CJ"`，EGL 1.5。
+  renderD128（`hygpu`）没有对应的 `*_dri.so`，只能退到 softpipe。
+  判定方法已固化成代码：`render::probe_gl_nodes()`。
+- **GL 栈不是 kmsro 在跑。** `vsdrm_dri.so` 确实是 megadriver 的别名，
+  但真正被用上的是 `pvr_dri.so` 对应的硬件驱动，不经过 kmsro 粘合层。
+- **RenderDevice 方向当前不通**：GBM 分配与导出都成功，
+  `drmPrimeFDToHandle` 在 KMS 节点上返回 EINVAL。
+
+### 仍待确认
+
 1. **`gbm_bo_create_with_modifiers` 的候选列表怎么给。**
-   把 card2 primary plane 的 IN_FORMATS 里该 format 的全部 modifier
-   传给 GBM 让它挑，还是先按某种优先级排序？倾向前者 —— 排序是
-   Step 4 dmabuf-feedback tranche 的事，Step 2 不预先引入策略。
+   把目标 plane 的 IN_FORMATS 里该 format 的全部 modifier 原样传给 GBM
+   让它挑。排序是 Step 4 dmabuf-feedback tranche 的事，Step 2 不预先引入策略。
+   —— 已按此实现，但在 RenderDevice 方向打通之前没有被真正压测过。
 2. **GBM 挑出的 modifier 不在 plane 支持列表里怎么办。**
    理论上不该发生（列表就是我们给的），但驱动可能忽略列表。
-   计划：断言 + 降级到 `gbm_bo_create`（无 modifier）+ WARN。
+   当前：`Framebuffer::add_with_fallback()` 降级 + WARN。
 3. **`DRM_RDWR` 要不要默认开。** 导入方想 mmap 写像素时必需，
-   但对纯 scanout 是多余权限。当前设计默认 `ReadOnly`，
-   Step 3 的 CPU client 显式传 `ReadWrite`。
+   对纯 scanout 是多余权限。当前默认 `ReadOnly`，
+   ScanoutDevice 路径与 Step 3 的 CPU client 显式传 `ReadWrite`。
+
+## 七、实现阶段的修正与新增决定（2026-08-30）
+
+以下都是写代码时撞到、并已在代码里落实的东西。上面第一到六节是设计时的
+判断，这一节是被现实修正过的部分 —— **冲突时以本节为准**。
+
+### 7.1 `DumbBuffer::create()` 不再顺手 addfb2（真 bug）
+
+原实现把「分配 + mmap + addfb2」绑成一步，理由写在头文件里：
+「单独持有一个分配了但没 fb 的 dumb buffer 在本项目里没有任何用途」。
+
+**这个判断是错的，而且 Step 2 自己的测试就撞上了。**
+`step2_prime_roundtrip` 的跨设备用例要在一个**没有 KMS 的 primary node**
+上分配 buffer，再导给显示设备。捆绑 addfb2 让它在分配阶段就失败，
+报错还指向 `drmModeAddFB2 ... EINVAL`，完全掩盖了真正要测的东西 ——
+在板上表现为 `N/A cross-device import`，看起来像跨设备导入不可行，
+实际上那一步根本没被执行到。
+
+推翻它的还有第二个场景：Step 3 起 client 进程不是 master、也不该建 fb，
+fb 是合成器的事。
+
+改法：`create()` 只做分配 + 映射，注册 fb 变成独立的
+`register_framebuffer()`。`DumbBufferChain` 与 `ScanoutDeviceSource`
+显式调用它，语义没变。
+
+**教训**：「把 A 和 B 绑一起，因为分开没有用途」这类论证，只在你已经
+枚举完所有用途时才成立。而在一个还没写完的项目里，你没有。
+默认拆开，需要时提供一个组合的便捷函数，代价小得多。
+
+### 7.2 EGL 能导入 ≠ GL 能往里画
+
+`egl::Caps` 原本只探 EGL 侧扩展。但
+
+- `EGL_EXT_image_dma_buf_import` 管的是「dmabuf → EGLImage」
+- `GL_OES_EGL_image` 管的是「EGLImage → renderbuffer / texture」
+
+两个扩展来自不同规范，实现上确实可能只有前者。只查前者就开始画，
+失败点会落在一个看不出原因的 `glCheckFramebufferStatus`。
+
+所以 `Caps` 增加了 GL 侧字段（在 `make_current()` 之后由
+`query_gl_caps()` 填），`probe_caps` 增加了一条 **GL render target** 闸门，
+且这条闸门**真的建一次 FBO**，不查字符串 —— 扩展在、入口点在、
+FBO 仍可能 INCOMPLETE。
+
+### 7.3 两条绑定路径都要实现，优先 renderbuffer
+
+`GL_OES_EGL_image` 给出两个入口：
+
+```
+glEGLImageTargetRenderbufferStorageOES    EGLImage -> renderbuffer
+glEGLImageTargetTexture2DOES              EGLImage -> texture 2D
+```
+
+`GlRenderTarget::create()` 先试 renderbuffer，FBO 不完整就退到 texture，
+降级 WARN，实际走了哪条记在 `attach_kind()` 里。
+
+优先 renderbuffer 的理由：它语义上就是「只写的渲染目标」，驱动不需要为它
+准备采样路径。texture 路径在某些实现上会触发一次隐式布局转换，
+而那正好会毁掉费劲协商来的 modifier —— 症状是「画面对但 modifier 白协商了」，
+不检查根本发现不了。
+
+### 7.4 同步：Step 2 用 `glFinish()`，且明确写成待删
+
+`render::finish_rendering()` 现在就是 `glFinish()` —— CPU 阻塞等 GPU，
+正是现代显示管线要消灭的东西。**明知故犯，并且标了 `TODO(step6)`。**
+
+不依赖隐式同步（dmabuf reservation object 上的 fence）的理由有两条：
+
+1. **不保证存在**。挂不挂由驱动决定，跨设备路径尤其没谱。
+2. **不可观测**。成立时和 `glFinish` 效果一样，不成立时是偶发花屏。
+   分不出这两种情况的机制，不能作为正确性依据。
+
+蒙对了比错了更糟：错了会被立刻发现，蒙对了会在换一块板子时突然坏掉。
+
+Step 6 删掉这一行时，帧率的变化就是显式同步带来的收益，可以直接量。
+
+### 7.5 两个 demo 合并成一个，用 `--draw cpu|gl`
+
+原计划 `step2_gbm_scanout` 与 `step2_gles_cube` 两个 demo。合并了，
+因为二者的差别**只有「谁往 buffer 里写像素」这一段**，而 modeset、
+帧循环、事件处理、退出清理、ioctl 记账是逐字相同的几百行。
+
+抄两份的直接后果是：其中一份出了 bug，另一份照样绿，而你会相信绿的那份。
+
+合并后原计划想要的性质仍然在：`--draw cpu` 先跑通链路，`--draw gl`
+再把 GL 接上去，GL 出问题时能立刻排除是链路问题。
+
+另外不画立方体，画一个旋转四边形：立方体要深度缓冲，
+那意味着还要给 FBO 配一个 depth renderbuffer，多一个独立的失败点。
+这一步要验证的是「导入的 dmabuf 能不能当渲染目标」，不是 3D 管线。
+
+### 7.6 GBM 设备开在哪个节点，本身是探测结果
+
+教科书说 GBM 建在 render node 上。但当 GL 栈是「显示驱动 + 软件光栅化」，
+或者是 Mesa 的 kmsro 粘合层时，**能创建 GBM 设备的恰恰是显示节点**。
+
+`probe_caps` 和 `step2_gbm_scanout` 都改成两个节点依次试，并报告是哪个成的。
+回退到显示节点时一定 WARN —— 否则你会以为自己在 GPU 上跑。
+
+这不是权宜之计，是一种真实存在的拓扑，代码要能表达它。
+
+### 7.7 验收标准第 3 条要拆开
+
+原文：「`step2_gles_cube` 在 vsdrm 上 600 帧、帧间隔与 Step 1 同量级、丢帧 0」。
+
+当 GL 栈退化到软件光栅化时这条不可能达到，而那**不是本项目的 bug**。
+拆成两条：
+
+- **正确性**（现在验收）：像素正确、ioctl 配平、稳态零 prime/addfb、
+  `--no-modifiers` 下依然能上屏
+- **性能**（挂 `TODO(hw-gl)`）：等有硬件 GL 驱动之后再量
+
+同时 demo 的 `-f` 参数默认无限、可以指定小帧数，软件光栅化下先用小帧数
+验证正确性，别让帧率问题掩盖链路问题。
+
+### 7.8 稳态零 prime/addfb 靠计数器，不靠自觉
+
+`Swapchain` 在 `create()` 里做完全部分配、addfb2、EGLImage 导入、FBO 创建，
+运行期只切下标。帧循环每秒核对一次 `add_fb + prime_fd_to_handle +
+prime_handle_to_fd` 的增量，不为 0 直接 `LOG_ERROR`。
+
+这是验收标准第 5 条的实现方式：不是靠约定不调，是靠热路径上没有可调的东西，
+再加一个会喊的检查。「每帧重新 import + addfb2」是能跑的 —— 画面正常，
+只是白白多三次 ioctl，不主动检查没人会发现。
+
+### 7.9 渲染宿主节点必须实测，不能用配对结果（2026-08-31）
+
+这是本步最贵的一个教训，值得单列。
+
+`drm::find_render_node()` 用 `drmGetDevice2` 得到"与这个 KMS 节点同属一个
+物理设备的 render node"。在本硬件上它返回 renderD128 —— 因为 DPU 与另一个
+节点总线地址相同。而 renderD128 **没有对应的用户态驱动**，于是：
+
+```
+failed to load driver: hygpu
+kmsro: driver missing
+EGL 1.4 ready -- renderer 'softpipe'
+```
+
+**Mesa 不报错，它退到软件光栅化。** 后果是一连串看起来合理但全错的结论：
+
+- "render-device 分配路径 DEGRD" —— 其实是软件后端分配不出可扫描输出的内存，
+  与 GPU 无关
+- "GL 栈是 softpipe，这块板子没有硬件 GL" —— 板子有 GPU，跑在 renderD130 上
+- "渲染节点支持 timeline syncobj，Step 6 可以上 linux-drm-syncobj-v1" ——
+  问的是 renderD128，真正的渲染节点报 0
+
+三条结论，三个方向的设计决定，全部建立在一次错误的节点选择上。
+而**每一步都没有任何东西报错**。
+
+修法：新增 `include/mw/render/gl_node.hpp`，对每个候选节点真的做四件事：
+
+1. `gbm_create_device`
+2. EGL 初始化 + GLES 上下文
+3. 导入一块**外来的** dmabuf 并绑成渲染目标（"别人分配我来画"）
+4. 自己分配 scanout 用途的 bo 并交给 KMS 注册 fb（"我分配别人来扫"）
+
+`find_render_node()` 保留，但文档里明确写了它是元数据关系、不是能力判断，
+且用它选渲染设备的失败方式是**静默的**。
+
+**第 3 与第 4 条是两个方向，都测，都不预设哪个是主路。**
+当前环境下第 4 条不通（`drmPrimeFDToHandle` EINVAL），但那是这块板子今天的
+状态，不是架构。KMD / UMD / 硬件都还在演进，两条路径的代码都留着，
+可用性一律运行时探测。见 `TODO(hw-import)`。
+
+#### 关于"软件光栅化"的识别
+
+`GlNode::looks_like_software()` 匹配几个众所周知的软件后备实现的名字。
+这**不是厂商判断** —— 那些名字在任何机器上都可能出现，与具体板卡无关。
+
+之所以需要它：软件光栅化能**通过上面全部四条能力判据**，只是慢。
+单靠能力分不出来。所以它只用于多个节点能力相当时打破平局，
+并且一定打印出来让人复核，主逻辑不读它。
+
+这是对"运行时探测优于编译期假设"的一个补充：**有些差异探测不出来，
+只能靠一个明确标注为启发式的提示，并把判断权交回给人。**

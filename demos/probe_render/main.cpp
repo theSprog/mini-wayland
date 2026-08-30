@@ -195,18 +195,20 @@ void interpret(const std::vector<NodeInfo>& nodes) {
     }
 
     LOG_INFO("");
-    LOG_INFO("the render node that actually drives the GPU cannot be determined from DRM");
-    LOG_INFO("metadata alone -- the DRM driver name is not always the vendor name. To");
-    LOG_INFO("confirm, run an EGL/GLES program against each candidate and read back");
-    LOG_INFO("GL_RENDERER, or check which node the Mesa loader picks:");
+    LOG_INFO("the pairing above is metadata: libdrm groups nodes by bus address. It does");
+    LOG_INFO("NOT say which node runs GL. When one physical device exposes several DRM");
+    LOG_INFO("nodes with different jobs, which one gets 'paired' depends on enumeration");
+    LOG_INFO("order, not on capability -- and picking the wrong one fails silently, by");
+    LOG_INFO("falling back to a software rasteriser that works and is a hundred times");
+    LOG_INFO("slower.");
     LOG_INFO("");
-    LOG_INFO("  EGL_LOG_LEVEL=debug MESA_DEBUG=1 kmscube 2>&1 | grep -i 'driver\\|render'");
+    LOG_INFO("to find the real GL host, bring up GBM + EGL on every candidate:");
     LOG_INFO("");
-    LOG_INFO("if the GL stack turns out to be Mesa kmsro (the glue layer for split");
-    LOG_INFO("display/render devices), note that kmsro allocates scanout buffers on the");
-    LOG_INFO("*display* device -- the same strategy this project calls ScanoutDevice.");
-    LOG_INFO("Mesa links all its drivers as hardlinks to one megadriver, so identical");
-    LOG_INFO("inode numbers across many *_dri.so indicate such a build:");
+    LOG_INFO("  ./build/debug/bin/probe_caps        # prints a GL host candidate table");
+    LOG_INFO("");
+    LOG_INFO("Mesa links its drivers as hardlinks to one megadriver, so identical inode");
+    LOG_INFO("numbers across many *_dri.so tell you which drivers that build contains --");
+    LOG_INFO("a node whose driver name has no matching *_dri.so cannot host GL at all:");
     LOG_INFO("");
     LOG_INFO("  ls -li <mesa dri dir>/*.so | sort -n | head -20");
 }

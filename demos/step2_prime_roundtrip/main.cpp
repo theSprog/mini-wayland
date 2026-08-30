@@ -247,6 +247,11 @@ CaseResult cross_device_import(BorrowedFd display, const std::string& render_pat
     // 所以这里要找的是"另一个设备的 **primary node**"：它没有 KMS
     // （不是显示设备），但因为是 primary node，dumb ioctl 是放行的。
     // 这样就能在不引入 GBM 的前提下测跨设备导入。
+    //
+    // 注意 DumbBuffer::create() **不注册 fb** —— 在这个节点上也注册不了，
+    // 它没有 KMS。早先的版本把 addfb2 绑在 create() 里，导致这条用例
+    // 在分配阶段就失败、报错还指向 addfb2，看起来像跨设备导入不可行，
+    // 实际上根本没走到那一步。见 docs/step2-design.md 第 7.1 节。
 
     auto buffer_result = DumbBuffer::create(render.borrow(), size, Format{DRM_FORMAT_XRGB8888});
     if (! buffer_result) {

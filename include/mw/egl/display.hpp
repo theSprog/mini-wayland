@@ -60,9 +60,41 @@ struct Caps {
     bool native_fence_sync = false;  ///< EGL_ANDROID_native_fence_sync
     bool wait_sync = false;          ///< EGL_KHR_wait_sync
 
+    // ---- GL 侧。必须在上下文 current 之后才能查，所以与上面分开。----
+    //
+    // EGL 能导入 dmabuf 成 EGLImage，**不等于** GL 能把它当渲染目标。
+    // 前者是 EGL_EXT_image_dma_buf_import 的事，后者要 GL_OES_EGL_image。
+    // 这两个扩展来自不同的规范，实现上也确实可能只有其一。
+
+    std::string gl_vendor{};
+    std::string gl_renderer{};
+    std::string gl_version{};
+    std::string glsl_version{};
+
+    /// GL_OES_EGL_image：提供 glEGLImageTargetTexture2DOES 与
+    /// glEGLImageTargetRenderbufferStorageOES。两条绑定路径都依赖它。
+    bool gl_egl_image = false;
+
+    /// GL_OES_EGL_image_external：采样外部 YUV 图像用。Step 5 才需要。
+    bool gl_egl_image_external = false;
+
+    /// glEGLImageTargetRenderbufferStorageOES 的入口拿得到吗
+    ///
+    /// 拿得到也不保证 FBO 会完整 —— 真正的判据是建一次然后
+    /// glCheckFramebufferStatus。见 render/target.hpp。
+    bool gl_renderbuffer_from_image = false;
+
+    /// glEGLImageTargetTexture2DOES 的入口拿得到吗
+    bool gl_texture_from_image = false;
+
     /// 本步能否工作。缺项由 missing() 列出。
     bool sufficient_for_rendering() const noexcept {
         return image_base && dmabuf_import && surfaceless_context;
+    }
+
+    /// GL 能不能把导入的 dmabuf 当渲染目标（两条绑定路径至少有一条）
+    bool can_render_into_imported_image() const noexcept {
+        return gl_egl_image && (gl_renderbuffer_from_image || gl_texture_from_image);
     }
 
     /// 缺失的必需扩展名，用于给出可行动的错误信息
@@ -125,6 +157,14 @@ class Display {
 
     /// GL_RENDERER / GL_VERSION，需要上下文已 current。诊断用。
     std::string gl_renderer() const;
+
+    /**
+     * @brief 查询 GL 侧能力，填进 caps()
+     *
+     * `create()` 里在 make_current 之后自动调一次。上下文被别的代码
+     * 重新绑定过之后可以再调，代价是几次 glGetString。
+     */
+    void query_gl_caps();
 
     std::string to_string() const;
 

@@ -83,8 +83,14 @@ class ScanoutDeviceSource final : public BufferSource {
         }
         drm::DumbBuffer dumb = std::move(dumb_result).value();
 
-        // GEM handle 已经在 KMS 节点上，fb 是 DumbBuffer 自己建的 ——
+        // GEM handle 已经在 KMS 节点上，直接 addfb2 ——
         // 这条路径完全不经过 PRIME 导入。
+        if (auto status = dumb.register_framebuffer(); ! status) {
+            return Err(drm::Errc::AddFbFailed,
+                       fmt("the scanout device would not register this dumb buffer as a "
+                           "framebuffer: {}",
+                           status.error().message));
+        }
         auto exported = drm::export_dmabuf(kms_fd_, dumb.handle(), drm::PrimeAccess::ReadWrite);
         if (! exported) {
             return Err(drm::Errc::Unsupported,

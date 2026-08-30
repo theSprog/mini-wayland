@@ -44,10 +44,20 @@ class DumbBuffer {
     DumbBuffer& operator=(const DumbBuffer&) = delete;
 
     /**
-     * @brief 分配 + 映射 + 注册 fb，一步到位
+     * @brief 分配 + 映射。**不注册 fb。**
      *
-     * 三件事绑在一起是有意的：单独持有一个"分配了但没 map 也没 fb"的
-     * dumb buffer 在本项目里没有任何用途，拆开只会多出无效状态。
+     * @note 早先的版本把 addfb2 一起做了，理由是"分配了却没有 fb 的 dumb
+     *       buffer 没有用途"。这个判断是错的，两个场景直接推翻它：
+     *
+     *       1. **没有 KMS 的节点也能分配 dumb**。`CREATE_DUMB` 是 primary
+     *          node 上就放行的 ioctl，而 addfb2 只有显示设备接受。想在一个
+     *          非显示节点上分配 buffer 再导给显示设备（跨设备导入的验证），
+     *          捆绑 addfb2 会让它在分配阶段就失败，且报错指向 addfb2，
+     *          完全掩盖了真正要测的东西。
+     *       2. **client 进程不是 master，也不该建 fb**。Step 3 起 client
+     *          只负责分配和画，fb 是合成器的事。
+     *
+     *       所以注册 fb 是独立的一步，见 `register_framebuffer()`。
      *
      * @param bpp 每像素位数。只支持 32（XR24/AR24）；其他值返回 Unsupported。
      *            dumb buffer 的 bpp 与 format 必须自洽，这里不做转换表，
@@ -55,6 +65,17 @@ class DumbBuffer {
      */
     static Result<DumbBuffer> create(BorrowedFd fd, Size size, Format format,
                                      uint32_t bpp = 32);
+
+    /**
+     * @brief 在**同一个 fd** 上把这块内存注册成 KMS framebuffer
+     *
+     * 只在有 KMS 的节点上有意义。已经注册过时直接返回成功（幂等）。
+     *
+     * 走朴素的 `drmModeAddFB2`（modifier 记为 kModifierInvalid）而不是
+     * 显式 LINEAR：dumb buffer 的排布本来就该由驱动说了算，
+     * 两条路径的语义差别见 framebuffer.hpp。
+     */
+    Status register_framebuffer();
 
     // ---- 几何 ----
 

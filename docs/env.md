@@ -1,8 +1,8 @@
 # 目标环境
 
-> 状态：Step 1 完成后复核过一遍，下面写的都是**当前实测结论**。
+> 状态：Step 2 的 GL 路径打通后复核过一遍，下面写的都是**当前实测结论**。
 > 早期勘察中被推翻的说法已删除，不保留历史版本。
-> 最后更新：2026-08-29
+> 最后更新：2026-08-31
 
 ---
 
@@ -26,22 +26,56 @@
 
 ## 二、DRM 节点拓扑
 
+整机是**一个总的父模块 + 两块外购 IP**：显示控制器（DPU）与 3D GPU 各自
+是独立的 IP，各自出一套 DRM 节点。跨设备传 buffer 是这个拓扑的必然结果，
+不是可选的复杂化。
+
 ```
-/dev/dri/card0       driver=hygpu     PCI 0000:01:00.4   无 KMS 资源
-/dev/dri/card1       driver=hantro    platform           视频编解码，与本项目无关
-/dev/dri/card2       driver=vsdrm     PCI 0000:01:00.4   ← KMS 显示节点
-/dev/dri/card3       driver=pvr       platform           PowerVR，无关
-/dev/dri/card4       driver=vkms      虚拟               modprobe vkms 后出现
-/dev/dri/renderD128  driver=hygpu                        ← 与 card2 配对的 render node
+/dev/dri/card0       driver=hygpu     无 KMS 资源
+/dev/dri/card1       driver=hantro    视频编解码，与本项目无关
+/dev/dri/card2       driver=vsdrm     ← KMS 显示节点（DPU，芯原 IP）
+/dev/dri/card3       driver=pvr       ← GPU 的 primary node（Imagination IP）
+/dev/dri/card4       driver=vkms      虚拟，modprobe vkms 后出现
+/dev/dri/renderD128  driver=hygpu
+/dev/dri/renderD129  driver=hantro
+/dev/dri/renderD130  driver=pvr       ← **3D 渲染实际发生在这里**
 ```
 
-**两个关键点：**
+### 关键点一：libdrm 的"配对"结果与"哪个节点跑 GL"是两回事
 
-1. card0 和 card2 是**同一个 PCI 设备的两个 DRM 节点**，不是两颗芯片。
-   card2 的 DRM driver name 是 `vsdrm`（芯原 VeriSilicon），PCI driver name 是 `hygpu`。
-   `modetest -M` 要的是前者。
-2. **KMS fd 与 render fd 必须在代码里分离。** 二者能力集不同，
-   见下面 syncobj 那一节。
+`drmGetDevice2` 把 card2 配到 **renderD128**，因为它们总线地址相同。
+但 renderD128 用户态没有对应的 UMD，于是 GL 栈**静默退到软件光栅化**——
+不报错、画面正常、慢一百倍，而且分配不出可扫描输出的内存。
+
+实测结论（`probe_caps` 的 GL host candidate 表，EGL 真的建一次）：
+
+```
+/dev/dri/renderD128   EGL 1.4   renderer 'softpipe'      ← 软件后备
+/dev/dri/renderD130   EGL 1.5   renderer 'Hygon CJ'      ← 硬件，3D 在这里
+```
+
+**所以代码里不允许用 `find_render_node()` 的结果去选渲染设备。**
+选宿主节点走 `render::probe_gl_nodes()`：对每个候选真的建一次
+GBM + EGL + 渲染目标，按实测能力排名。见 `include/mw/render/gl_node.hpp`。
+
+### 关键点二：KMS fd 与 render fd 必须在代码里分离
+
+二者能力集不同（见下面 syncobj 一节），GEM handle 的作用域也是单个
+drm_file。跨节点用 buffer 只能走 PRIME。
+
+### 关键点三：两个传输方向，当前只有一个通
+
+| 方向 | 当前实测 | 说明 |
+| --- | --- | --- |
+| DPU 分配 → GPU 导入渲染（ScanoutDevice） | 待复核 | 新增的 GL render target 闸门专门测这条 |
+| GPU 分配 → DPU 导入扫描（RenderDevice） | **EINVAL** | GBM 分配与导出都成功，`drmPrimeFDToHandle` 在 card2 上被拒 |
+
+失败点是 `drmPrimeFDToHandle(card2, fd) = -EINVAL`：GPU 私有池分配的
+离散页，DPU 侧收不下（物理连续性要求，或未给 DPU 配 IOMMU 映射）。
+
+**不因此把代码锁死到单一方向。** 两条路径都保留在 `mw/render/buffer_source.hpp`
+里，可用性一律运行时探测。KMD / UMD / 硬件都还在演进，今天关着的门明天可能开。
+见 `TODO(hw-import)`。
 
 ## 三、card2 (vsdrm) KMS 资源
 
@@ -111,22 +145,33 @@ plane 分两档：
 > `drm_format_modifier` 记录，并验证
 > `sum(popcount(bitmask)) == 解析出的 pair 数`。数据自洽即可信。
 
-### syncobj：在 render node 上，不在 KMS 节点上
+### syncobj：要问**实际承载渲染的那个节点**
 
 ```
-card2 (vsdrm, KMS):        DRM_CAP_SYNCOBJ=0  SYNCOBJ_TIMELINE=0
-                           IN_FENCE_FD 属性=有  OUT_FENCE_PTR 属性=有
-renderD128 (hygpu, render): DRM_CAP_SYNCOBJ=1  SYNCOBJ_TIMELINE=1
+card2      (vsdrm, KMS):    DRM_CAP_SYNCOBJ=0  SYNCOBJ_TIMELINE=0
+                            IN_FENCE_FD 属性=有  OUT_FENCE_PTR 属性=有
+renderD130 (pvr, GPU):      DRM_CAP_SYNCOBJ=?  SYNCOBJ_TIMELINE=**0**
+renderD128 (hygpu):         DRM_CAP_SYNCOBJ=1  SYNCOBJ_TIMELINE=1
 ```
 
-这不矛盾。**syncobj 是渲染侧特性**（驱动的 `DRIVER_SYNCOBJ` 标志），
-KMS 节点不 advertise 它很正常。KMS 提交侧的显式同步只需要 sync_file fd，
+KMS 节点不 advertise syncobj 很正常——**syncobj 是渲染侧特性**
+（驱动的 `DRIVER_SYNCOBJ` 标志），KMS 提交侧的显式同步只需要 sync_file fd，
 跟 syncobj 无关。
 
-**Step 6 因此拆成两半：**
+**但 renderD128 那一行没有意义**：它不是承载 3D 的节点。早期文档据此得出
+"`linux-drm-syncobj-v1` 可行"，那是问错了节点。真正承载渲染的 renderD130
+报 `SYNCOBJ_TIMELINE=0`。
 
-- KMS 提交侧：`IN_FENCE_FD` / `OUT_FENCE_PTR`，属性齐全，现在就能做
-- `linux-drm-syncobj-v1` 协议侧：用 renderD128 的 timeline syncobj，**可行**
+**Step 6 因此收敛成：**
+
+- **合成器自己的显式同步**：`EGL_ANDROID_native_fence_sync` 取 fence fd
+  → plane 的 `IN_FENCE_FD`；回读走 `OUT_FENCE_PTR`。**现在就能做**，
+  不依赖 syncobj。
+- **`linux-drm-syncobj-v1` 协议侧**：渲染节点无 timeline syncobj，
+  **暂时提供不了**，客户端只能退到隐式同步。见 `TODO(syncobj-timeline)`。
+
+这条闸门现在由 `probe_caps` 在**探测出来的 GL 宿主节点**上问，
+不再问配对节点。驱动补上 timeline syncobj 之后重跑就会自己变绿。
 
 ## 四、VKMS (card4)
 
@@ -143,12 +188,19 @@ connector Virtual-2，preferred 1024x768
 
 ## 五、用户态图形栈
 
-- **GL**：`/usr/local/lib/dri/vsdrm_dri.so`（vendor Gallium 驱动）→ GLES 3.2 / Mesa 22.3.5
-  - `vendor: "Hygon"`，`renderer: "Hygon CJ"`
-  - strace 里出现的 `zink_dri.so` 只是 loader 探测，**GL 不经 Vulkan**
-- **Vulkan**：`/etc/vulkan/icd.d/` 下只有 xdxgpu / musa / powervr，**无 hygon ICD ⇒ 不可用**
+- **GL**：硬件路径在 **`/dev/dri/renderD130`**（DRM driver name `pvr`），
+  经 `/usr/local/lib/dri/pvr_dri.so` 加载
+  - `EGL 1.5`，`vendor: "Mesa Project"`，`renderer: "Hygon CJ"`
+  - `/usr/local/lib/dri/` 下 `pvr_dri.so` / `vsdrm_dri.so` / `swrast_dri.so` /
+    `kms_swrast_dri.so` / `zink_dri.so` **共享同一个 inode（链接数 5）**——
+    megadriver 构建，这五个名字是同一个 `.so` 的别名
+  - **没有 `hygpu_dri.so`**。所以 renderD128（driver name `hygpu`）加载不到
+    对应驱动，Mesa 退到 softpipe。`kmsro: driver missing` 就是这么来的
+  - 在 renderD130 上分配时会看到 `MESA: error: ZINK: vkCreateImage failed`——
+    loader 试过 zink 路径，最终用的不是它（`GL_RENDERER` 不是 zink）
+- **Vulkan**：`/etc/vulkan/icd.d/` 下无可用 ICD ⇒ 不可用
 
-已确认可用的 EGL 扩展（Step 2/3/6 依赖）：
+已确认可用的 EGL 扩展（在 renderD130 上测得，Step 2/3/6 依赖）：
 
 ```
 EGL_EXT_image_dma_buf_import
@@ -158,6 +210,9 @@ EGL_ANDROID_native_fence_sync      ← Step 6 拿 fence FD 靠它
 EGL_MESA_platform_gbm
 EGL_KHR_fence_sync / EGL_KHR_wait_sync
 ```
+
+**判断一个节点能不能跑 GL 的可靠方法只有一个：真建一次。**
+`probe_caps` 会打出全部候选节点的表格，包括失败的和它们的原因。
 
 ## 六、未解决问题
 
@@ -186,7 +241,7 @@ KMS 状态未正确 teardown；重启后仍复现。legacy `drmModeSetCrtc` 会�
 TODO(kernel-6.6):   atomic async page flip（DRM_MODE_PAGE_FLIP_ASYNC 需 6.8+）
 TODO(kernel-6.6):   debugfs CRC 自动化校验
 TODO(mesa-24.1):    linux-drm-syncobj-v1 标准客户端接入
-TODO(vulkan-icd):   无 hygon Vulkan ICD，fallback 渲染器用 GLES3
+TODO(vulkan-icd):   无可用 Vulkan ICD，fallback 渲染器用 GLES3
 TODO(kmd-atomic):   vsdrm atomic commit EBUSY，用 --dry-run + bisect 定位
 TODO(kmd-modifier): 私有 modifier addfb2 EINVAL，走 add_with_fallback 降级
 TODO(hotplug):      Step 4 接 udev monitor 后由事件驱动 rescan
@@ -199,11 +254,14 @@ TODO(dc-info-blob): CRTC 的 DC_INFO blob（36 字节）内容未知，可能含
                     max_blend_layer 之类的整机限制。Step 5 之前解一次。
 TODO(dc-exception): 硬件异常（含 BE_UNDERRUN）经 SIGUSR2 上报，机制不适合
                     合成器直接用。等驱动侧改成 DRM event 再接。
-TODO(gpu-node):     哪个节点承载 3D 渲染仍未定。card0/renderD128=hygpu
-                    （PRIME 收发都支持、有 dumb），card3/renderD130=pvr
-                    （**只能导出，不能导入，无 dumb**）。若渲染实际在 pvr 上，
-                    ScanoutDevice 方向会因为 pvr 不能导入而走不通。
-                    判定方法：对每个节点跑 GLES 程序读 GL_RENDERER。
+TODO(hw-import):    GPU 分配 -> DPU 导入（RenderDevice 方向）目前
+                    drmPrimeFDToHandle 返回 EINVAL。两条方向的代码都在，
+                    可用性运行时探测；KMD 演进后重跑 probe_caps 即可。
+TODO(syncobj-timeline): 渲染节点 renderD130 报 SYNCOBJ_TIMELINE=0，
+                    linux-drm-syncobj-v1 暂时提供不了。合成器自身的显式同步
+                    走 EGL_ANDROID_native_fence_sync + IN_FENCE_FD，不受影响。
+TODO(hw-gl):        GL 路径的帧率 / 丢帧指标，等硬件 GL 在端到端链路上
+                    跑通后再定量。
 ```
 
 ## 八、常用命令

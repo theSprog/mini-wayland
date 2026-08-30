@@ -32,12 +32,13 @@ make V=1
 ./build/debug/bin/probe_kms -F     # IN_FORMATS blob 原始结构 + 自校验
 ./build/debug/bin/probe_kms -v     # 全量属性表，几百行，建议重定向
 
-./build/debug/bin/probe_render     # render node 枚举，回答"哪个节点是 GPU"
+./build/debug/bin/probe_render     # 节点枚举与元数据（**不**回答哪个节点跑 GL）
 ./build/debug/bin/probe_render -m  # 顺带探测各节点的 pitch 对齐要求
 
 ./scripts/check-env.sh             # 能力闸门：现在能支撑到第几步、被什么挡住
 ./build/debug/bin/probe_caps       # 同上，只跑闸门部分
 ./build/debug/bin/probe_caps -s 6  # 只看某一步的闸门
+./build/debug/bin/probe_caps -r /dev/dri/renderDNNN  # 强制指定 GL 宿主节点
 
 ./build/debug/bin/step2_prime_roundtrip            # PRIME 导出/导入正确性
 ./build/debug/bin/step2_prime_roundtrip -s 1920x1080   # 用真实分辨率压 stride 对齐
@@ -50,7 +51,19 @@ make V=1
 sudo systemctl stop lightdm        # 或 Ctrl+Alt+F3 切裸 tty
 sudo ./build/debug/bin/step1_kms_atomic_dumb -d vkms --dry-run   # 只做 TEST_ONLY
 sudo ./build/debug/bin/step1_kms_atomic_dumb -d vkms
+
+# Step 2：GBM/dumb 分配 -> PRIME -> atomic 上屏
+sudo ./build/debug/bin/step2_gbm_scanout --dry-run          # 只做 TEST_ONLY
+sudo ./build/debug/bin/step2_gbm_scanout                    # 显示侧分配 + CPU 绘制
+sudo ./build/debug/bin/step2_gbm_scanout --draw gl          # 同上，改用 GLES 绘制
+sudo ./build/debug/bin/step2_gbm_scanout -s render          # 渲染侧分配（GBM）
+sudo ./build/debug/bin/step2_gbm_scanout --no-modifiers     # 模拟无 IN_FORMATS 的驱动
+sudo ./build/debug/bin/step2_gbm_scanout -g /dev/dri/card2  # 指定 GBM/EGL 用哪个节点
 ```
+
+`--draw cpu` 与 `--draw gl` 的差别只有"谁往 buffer 里写像素"这一段，
+modeset / 帧循环 / 记账是同一份代码。先跑通 cpu 再切 gl —— GL 出问题时
+可以立刻排除链路问题。
 
 ## 目录
 
@@ -198,9 +211,13 @@ VKMS 过而 vsdrm 不过 ⇒ 大概率 KMD 问题；反过来 ⇒ 代码有 vend
   - [x] `mw/gbm/`（分配）、`mw/egl/`（dmabuf ↔ EGLImage）
   - [x] `mw/render/buffer_source`：显示侧 / 渲染侧两条分配路径
   - [x] `demos/probe_caps` + `scripts/check-env.sh`：能力闸门
-  - [ ] `mw/render/target`（EGLImage → FBO）与 GLES demo
-  - [ ] 板上跑一次 `check-env.sh`，把闸门结果写回 docs/
-  - [ ] `mw/gbm/`、`mw/egl/`、`mw/render/`
+  - [x] `mw/render/target`（EGLImage → renderbuffer / texture → FBO）
+  - [x] `mw/render/swapchain`（N 组 buffer + 渲染目标的轮转）
+  - [x] `demos/step2_gbm_scanout`：`--draw cpu|gl`、`-s scanout|render`、`--no-modifiers`
+  - [x] `mw/render/gl_node`：实测哪个节点能跑 GL，不用元数据配对
+  - [ ] 板上双环境验收（VKMS 只测 Step 1 回归，vsdrm 测端到端）
+  - [ ] 把闸门结果写回 `docs/step2-probe-results.md`
+  - [ ] `learning-notes/02-*.md`
 - [ ] Step 3：DMA-BUF 跨进程 direct scanout
 - [ ] Step 4：最小 wayland server
 - [ ] Step 5：硬件 plane 分配器（TEST_ONLY 试探 + 降级）

@@ -214,8 +214,21 @@ struct DeviceCandidate {
 /// 扫 /dev/dri/card*，不改变任何状态。打不开的节点跳过并 LOG_DEBUG。
 std::vector<DeviceCandidate> enumerate_devices();
 
-/// 找与该 KMS 设备同属一个物理设备的 render node 路径。Step 2 起用。
-/// 找不到返回 nullopt（VKMS 就没有 render node）。
+/**
+ * @brief 找与该 KMS 设备同属一个物理设备的 render node 路径
+ *
+ * 找不到返回 nullopt（纯虚拟设备就没有 render node）。
+ *
+ * @warning **这是一条元数据关系，不是能力判断。** 它回答"同一个物理设备的
+ *          render node 是哪个"，靠 libdrm 按总线地址聚合得出。当一个物理
+ *          设备下挂着多个功能不同的 DRM 节点时，返回哪个取决于枚举顺序，
+ *          与"哪个节点跑得起 GL"无关，二者会分叉。
+ *
+ *          要选渲染宿主请用 `mw/render/gl_node.hpp` 的 `probe_gl_nodes()`，
+ *          它对每个候选真的建一次 GBM + EGL + 渲染目标。
+ *          用本函数的结果去选渲染设备，失败方式是**静默的**：
+ *          用户态会退到软件光栅化，一切看起来正常，只是慢一百倍。
+ */
 std::optional<std::string> find_render_node(const std::string& kms_path);
 
 // ---------------------------------------------------------------------------

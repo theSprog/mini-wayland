@@ -135,16 +135,23 @@ Result<DumbBuffer> DumbBuffer::create(BorrowedFd fd, Size size, Format format, u
     }
     buffer.pixels_ = static_cast<uint8_t*>(addr);
 
-    // ---- 4. addfb2 ----
-    // dumb buffer 是线性的，但我们传 kModifierInvalid 走朴素的 AddFB2 路径，
-    // 让内核按驱动默认推断 —— 这和显式传 LINEAR 不是一回事，
-    // 而 dumb buffer 的排布本来就该由驱动说了算。
-    const FramebufferDesc desc = FramebufferDesc::single_plane(
-        size, format, buffer.handle_, buffer.pitch_, 0, kModifierInvalid);
-    buffer.fb_ = TRY(Framebuffer::add(fd, desc));
-
+    // 到此为止。addfb2 是独立的一步 —— 见头文件里为什么。
     LOG_INFO("dumb buffer ready: {}", buffer.to_string());
     return Ok(std::move(buffer));
+}
+
+Status DumbBuffer::register_framebuffer() {
+    if (! valid()) {
+        return Err(Errc::Internal, "register_framebuffer() on an empty dumb buffer");
+    }
+    if (fb_.valid()) {
+        return Ok();
+    }
+    const FramebufferDesc desc =
+        FramebufferDesc::single_plane(size_, format_, handle_, pitch_, 0, kModifierInvalid);
+    fb_ = TRY(Framebuffer::add(fd_, desc));
+    LOG_DEBUG("dumb buffer registered as {}", drm::to_string(fb_.id()));
+    return Ok();
 }
 
 span<uint8_t> DumbBuffer::bytes() noexcept {
@@ -176,7 +183,7 @@ void DumbBuffer::fill(uint32_t argb) noexcept {
 std::string DumbBuffer::to_string() const {
     return fmt("{} {} pitch={} size={} handle={} fb={}", drm::to_string(size_),
                drm::to_string(format_), pitch_, byte_size_, drm::to_string(handle_),
-               drm::to_string(fb_.id()));
+               fb_.valid() ? drm::to_string(fb_.id()) : std::string("none"));
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +202,8 @@ Result<DumbBufferChain> DumbBufferChain::create(BorrowedFd fd, Size size, Format
     chain.count_ = count;
     for (uint32_t i = 0; i < count; ++i) {
         chain.buffers_[i] = TRY(DumbBuffer::create(fd, size, format));
+        // 缓冲链是给合成器用的，每一块都要能上屏，所以这里立刻注册 fb。
+        TRY(chain.buffers_[i].register_framebuffer());
     }
     LOG_INFO("allocated {} dumb buffers of {} ({} MiB total)", count, drm::to_string(size),
              (chain.buffers_[0].byte_size() * count) / (1024u * 1024u));
