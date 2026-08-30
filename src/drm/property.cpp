@@ -336,6 +336,7 @@ Result<PropertyBlob> PropertyBlob::create(BorrowedFd fd, const void* data, size_
     if (ret != 0) {
         return Err(Errc::BlobCreateFailed, fmt("drmModeCreatePropertyBlob(length={})", length));
     }
+    ++stats().blob_acquired;
     LOG_DEBUG("created property blob id={} length={}", blob_id, length);
     return Ok(PropertyBlob(fd, BlobId{blob_id}));
 }
@@ -352,6 +353,7 @@ void PropertyBlob::reset() noexcept {
     if (ret != 0) {
         LOG_WARN("drmModeDestroyPropertyBlob({}) failed; kernel blob leaked", id);
     } else {
+        ++stats().blob_released;
         LOG_TRACE("destroyed property blob id={}", id);
     }
     id_ = kNoBlob;

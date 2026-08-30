@@ -1,3 +1,6 @@
+# 尽量贴合 kdwarf 的既有风格，减少两边来回时的 diff 噪音。
+# 注意 SpaceAfterLogicalNot 需要 clang-format >= 12；老版本会忽略未知键并告警，
+# 不影响其余规则生效。
 ---
 Language: Cpp
 BasedOnStyle: Google

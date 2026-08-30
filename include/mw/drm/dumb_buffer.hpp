@@ -84,6 +84,19 @@ class DumbBuffer {
         return fb_;
     }
 
+    /**
+     * @brief 把 fb 的所有权移出去
+     *
+     * 用于把 dumb buffer 的 fb 交给别的容器持有，而 GEM 对象仍留在本对象里。
+     * 移出之后 `fb_id()` 返回 kNoFb。
+     *
+     * 调用方必须保证 fb 不会活得比本对象久 —— fb 引用的 GEM 对象归本对象所有，
+     * 本对象析构时会 DESTROY_DUMB。
+     */
+    Framebuffer take_framebuffer() noexcept {
+        return std::move(fb_);
+    }
+
     FbId fb_id() const noexcept {
         return fb_.id();
     }

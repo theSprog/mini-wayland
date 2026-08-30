@@ -55,6 +55,28 @@ struct IoctlStats {
     uint64_t add_fb = 0;
     uint64_t rm_fb = 0;           ///< 应与 add_fb 收敛
 
+    // ---- PRIME（Step 2 起）----
+    // gem_close 故意**不**与 prime_fd_to_handle 配对统计：内核对同一个
+    // dma_buf 的重复导入返回同一个 handle 且不加引用，所以 N 次导入只对应
+    // 1 次 close。配平表的准入判据（一种获取、一种释放、一一对应）不满足。
+    // 引用计数由 HandleCache 自己维护，用 live_count() 检查。
+    // ---- 资源配平（与上面的 ioctl 计数器分开）----
+    // ioctl 计数器记的是**尝试次数**，配平表要的是**成功获取次数**，二者不等：
+    //   - 失败的 create_dumb 会让 ioctl 计数 +1，但没有资源需要释放
+    //   - add_fb 的 modifier 降级路径可能发两次 ioctl 才拿到一个 fb
+    // 用 ioctl 计数器做配平会产生假阳性泄漏报告，掩盖真的泄漏。
+    // 这些字段由 RAII 类型在**成功**路径上显式递增。
+    uint64_t dumb_acquired = 0;
+    uint64_t dumb_released = 0;
+    uint64_t fb_acquired = 0;
+    uint64_t fb_released = 0;
+    uint64_t blob_acquired = 0;
+    uint64_t blob_released = 0;
+
+    uint64_t prime_handle_to_fd = 0;
+    uint64_t prime_fd_to_handle = 0;
+    uint64_t gem_close = 0;
+
     // ---- 每帧 ----
     uint64_t atomic_test = 0;
     uint64_t atomic_commit = 0;

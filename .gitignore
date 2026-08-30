@@ -4,3 +4,4 @@ compile_commands.json
 *.o
 *.d
 *.a
+/mini-wayland.tar

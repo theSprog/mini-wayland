@@ -192,6 +192,18 @@ TODO(kmd-modifier): 私有 modifier addfb2 EINVAL，走 add_with_fallback 降级
 TODO(hotplug):      Step 4 接 udev monitor 后由事件驱动 rescan
 TODO(vt):           VT 切换（KDSETMODE、VT_PROCESS）
 TODO(writeback):    有 2 个 writeback connector，可做无显示器自检管线
+TODO(plane-info-blob): 每个 plane 有 immutable blob "INFO"，实测 **4 字节**
+                    （仅 rotation）。CRTC 上另有 "DC_INFO" blob，36 字节，
+                    尚未解析。读时按 blob 实际长度读，不要按结构体 memcpy。
+TODO(dc-info-blob): CRTC 的 DC_INFO blob（36 字节）内容未知，可能含
+                    max_blend_layer 之类的整机限制。Step 5 之前解一次。
+TODO(dc-exception): 硬件异常（含 BE_UNDERRUN）经 SIGUSR2 上报，机制不适合
+                    合成器直接用。等驱动侧改成 DRM event 再接。
+TODO(gpu-node):     哪个节点承载 3D 渲染仍未定。card0/renderD128=hygpu
+                    （PRIME 收发都支持、有 dumb），card3/renderD130=pvr
+                    （**只能导出，不能导入，无 dumb**）。若渲染实际在 pvr 上，
+                    ScanoutDevice 方向会因为 pvr 不能导入而走不通。
+                    判定方法：对每个节点跑 GLES 程序读 GL_RENDERER。
 ```
 
 ## 八、常用命令

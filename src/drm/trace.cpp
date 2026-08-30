@@ -61,9 +61,11 @@ struct PairedCounter {
 };
 
 constexpr PairedCounter kPairs[] = {
-    {"property blob", &IoctlStats::create_blob, &IoctlStats::destroy_blob},
-    {"dumb buffer", &IoctlStats::create_dumb, &IoctlStats::destroy_dumb},
-    {"framebuffer", &IoctlStats::add_fb, &IoctlStats::rm_fb},
+    // 用 *_acquired/*_released 而不是 ioctl 计数器，理由见 trace.hpp 的注释：
+    // ioctl 计数是尝试次数，配平要的是成功次数。
+    {"property blob", &IoctlStats::blob_acquired, &IoctlStats::blob_released},
+    {"dumb buffer", &IoctlStats::dumb_acquired, &IoctlStats::dumb_released},
+    {"framebuffer", &IoctlStats::fb_acquired, &IoctlStats::fb_released},
 };
 
 /// 密封之后禁止再增长的项
@@ -111,6 +113,9 @@ std::string IoctlStats::to_string() const {
     append_if_nonzero(out, "destroy_dumb", destroy_dumb);
     append_if_nonzero(out, "add_fb", add_fb);
     append_if_nonzero(out, "rm_fb", rm_fb);
+    append_if_nonzero(out, "prime_handle_to_fd", prime_handle_to_fd);
+    append_if_nonzero(out, "prime_fd_to_handle", prime_fd_to_handle);
+    append_if_nonzero(out, "gem_close", gem_close);
     append_if_nonzero(out, "atomic_test", atomic_test);
     append_if_nonzero(out, "atomic_commit", atomic_commit);
     append_if_nonzero(out, "read_events", read_events);
@@ -202,6 +207,15 @@ IoctlStats IoctlStats::delta(const IoctlStats& newer, const IoctlStats& older) n
     d.destroy_dumb = newer.destroy_dumb - older.destroy_dumb;
     d.add_fb = newer.add_fb - older.add_fb;
     d.rm_fb = newer.rm_fb - older.rm_fb;
+    d.dumb_acquired = newer.dumb_acquired - older.dumb_acquired;
+    d.dumb_released = newer.dumb_released - older.dumb_released;
+    d.fb_acquired = newer.fb_acquired - older.fb_acquired;
+    d.fb_released = newer.fb_released - older.fb_released;
+    d.blob_acquired = newer.blob_acquired - older.blob_acquired;
+    d.blob_released = newer.blob_released - older.blob_released;
+    d.prime_handle_to_fd = newer.prime_handle_to_fd - older.prime_handle_to_fd;
+    d.prime_fd_to_handle = newer.prime_fd_to_handle - older.prime_fd_to_handle;
+    d.gem_close = newer.gem_close - older.gem_close;
     d.atomic_test = newer.atomic_test - older.atomic_test;
     d.atomic_commit = newer.atomic_commit - older.atomic_commit;
     d.read_events = newer.read_events - older.read_events;

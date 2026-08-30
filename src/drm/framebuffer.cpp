@@ -84,6 +84,7 @@ void Framebuffer::reset() noexcept {
     if (ret != 0) {
         LOG_WARN("drmModeRmFB({}) failed; kernel framebuffer leaked", id);
     } else {
+        ++stats().fb_released;
         LOG_TRACE("removed framebuffer {}", id);
     }
     id_ = kNoFb;
@@ -169,6 +170,9 @@ Result<Framebuffer> Framebuffer::add(BorrowedFd fd, const FramebufferDesc& desc)
                        errno_name(err), desc.to_string()));
     }
 
+    // 只在拿到 fb 之后计入配平表。add_fb_ioctl 可能因为 modifier 降级发两次
+    // ioctl 才成功，所以 ioctl 计数不能用来配平。
+    ++stats().fb_acquired;
     LOG_DEBUG("added framebuffer {} <- {}", to_string(FbId{fb_id}), desc.to_string());
     return Ok(Framebuffer(fd, FbId{fb_id}, desc));
 }
@@ -183,6 +187,7 @@ Result<Framebuffer> Framebuffer::add_with_fallback(BorrowedFd fd, const Framebuf
     uint32_t fb_id = 0;
     const int err = add_fb_ioctl(fd, desc, fb_id);
     if (err == 0) {
+        ++stats().fb_acquired;
         LOG_DEBUG("added framebuffer {} <- {}", to_string(FbId{fb_id}), desc.to_string());
         return Ok(Framebuffer(fd, FbId{fb_id}, desc));
     }
@@ -216,6 +221,7 @@ Result<Framebuffer> Framebuffer::add_with_fallback(BorrowedFd fd, const Framebuf
                        errno_name(plain_err), plain.to_string()));
     }
 
+    ++stats().fb_acquired;
     LOG_WARN("framebuffer created without modifier info; the driver will infer the layout");
     if (downgraded != nullptr) {
         *downgraded = true;

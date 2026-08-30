@@ -31,6 +31,17 @@ make V=1
 ./build/debug/bin/probe_kms        # KMS 资源摘要 + 十几条不变量自检
 ./build/debug/bin/probe_kms -F     # IN_FORMATS blob 原始结构 + 自校验
 ./build/debug/bin/probe_kms -v     # 全量属性表，几百行，建议重定向
+
+./build/debug/bin/probe_render     # render node 枚举，回答"哪个节点是 GPU"
+./build/debug/bin/probe_render -m  # 顺带探测各节点的 pitch 对齐要求
+
+./scripts/check-env.sh             # 能力闸门：现在能支撑到第几步、被什么挡住
+./build/debug/bin/probe_caps       # 同上，只跑闸门部分
+./build/debug/bin/probe_caps -s 6  # 只看某一步的闸门
+
+./build/debug/bin/step2_prime_roundtrip            # PRIME 导出/导入正确性
+./build/debug/bin/step2_prime_roundtrip -s 1920x1080   # 用真实分辨率压 stride 对齐
+./build/debug/bin/step2_prime_roundtrip -p /dev/dri/cardN  # 指定跨设备用例的对端
 ```
 
 点屏需要 DRM master：
@@ -66,7 +77,14 @@ docs/                见下
 | --- | --- | --- |
 | `mw/core` | 标准库 + `internal/` | 不认识 DRM |
 | `mw/drm` | 可以直接 `#include <xf86drm*.h>` | 这层的职责就是包装 libdrm |
-| 再往上 | **不得**包含 `xf86drm*.h` | 只能用 `mw/drm` 暴露的强类型 |
+| `mw/gbm` | `<gbm.h>` + `mw/drm` | 只做分配，不碰 KMS |
+| `mw/egl` | `<EGL/*>` + `mw/gbm` | dmabuf ↔ EGLImage |
+| `mw/render` | `<GLES*/*>` + 以上全部 | 归一成 `ScanoutBuffer` |
+| 再往上 | **不得**包含 `xf86drm*.h` / EGL / GL / GBM | 只能用 `mw/render` 暴露的类型 |
+
+`mw/render` 之上看不见 EGL / GL / GBM。Step 5 的 plane 分配器只该看见
+`ScanoutBuffer`，不该知道像素是怎么画出来的 —— `ScanoutBuffer` 用 pimpl
+把两条分配路径的持有物（dumb 的 GEM 对象 vs GBM 的 bo）藏起来守这条线。
 
 一个例外：`mw/drm/dump.hpp` 是唯一允许解码 modifier vendor 语义的地方，
 且只用于日志，主逻辑不得依赖它的返回值。
@@ -84,6 +102,13 @@ docs/                见下
 7. **运行时 caps 探测，不用 `#ifdef`**。同一份二进制要能跑 5.4 与 6.6、VKMS 与 vsdrm。
 8. **modifier 不透明**。主逻辑里不允许 `(mod >> 56) == vendor` 之类的判断。
 9. **注释可中文，字符串必须英文**。日志、错误消息、命令行输出一律英文。
+10. **硬件观察归 `docs/`，接口契约里不写具体驱动。**
+    `include/` 与 `src/` 的注释可以举例（"某些驱动在这里返回 EINVAL"），
+    但不允许把具体的设备名、节点号、驱动内部函数名、厂商配置开关写进
+    设计理由。判据：把这份代码搬到另一块板子上，注释是否仍然成立？
+    针对某块板子的读码结论写进 `docs/*-notes.md`，代码里用
+    "见 docs/xxx" 引用。demo 可以更贴近环境，但也不该把结论写死 ——
+    它们的职责是**把判断所需的信息打出来**，不是替人下结论。
 
 ## 可观测性
 
@@ -166,7 +191,16 @@ VKMS 过而 vsdrm 不过 ⇒ 大概率 KMD 问题；反过来 ⇒ 代码有 vend
 
 - [x] Step 0：环境勘察
 - [x] Step 1：atomic KMS + dumb buffer 点屏
-- [ ] Step 2：format modifiers + GBM/EGL
+- [ ] Step 2：PRIME 跨设备 + format modifiers + GBM/EGL（进行中）
+  - [x] `mw/drm/prime.hpp` —— 导出/导入 + handle 引用计数
+  - [x] `demos/probe_render`、`demos/step2_prime_roundtrip`
+  - [x] 板上探测，结果见 `docs/step2-probe-results.md`
+  - [x] `mw/gbm/`（分配）、`mw/egl/`（dmabuf ↔ EGLImage）
+  - [x] `mw/render/buffer_source`：显示侧 / 渲染侧两条分配路径
+  - [x] `demos/probe_caps` + `scripts/check-env.sh`：能力闸门
+  - [ ] `mw/render/target`（EGLImage → FBO）与 GLES demo
+  - [ ] 板上跑一次 `check-env.sh`，把闸门结果写回 docs/
+  - [ ] `mw/gbm/`、`mw/egl/`、`mw/render/`
 - [ ] Step 3：DMA-BUF 跨进程 direct scanout
 - [ ] Step 4：最小 wayland server
 - [ ] Step 5：硬件 plane 分配器（TEST_ONLY 试探 + 降级）

@@ -33,6 +33,8 @@ DumbBuffer::~DumbBuffer() {
                                     "handle={}", destroy.handle);
         if (ret != 0) {
             LOG_WARN("DESTROY_DUMB({}) failed; GEM object leaked", destroy.handle);
+        } else {
+            ++stats().dumb_released;
         }
         handle_ = GemHandle{0};
     }
@@ -95,6 +97,9 @@ Result<DumbBuffer> DumbBuffer::create(BorrowedFd fd, Size size, Format format, u
                    fmt("CREATE_DUMB {}x{} bpp={} failed with {}", size.width, size.height, bpp,
                        errno_name(errno)));
     }
+
+    // 只有 ioctl 成功之后才计入配平表 —— 失败的 create 没有资源需要释放。
+    ++stats().dumb_acquired;
 
     buffer.handle_ = GemHandle{create.handle};
     buffer.pitch_ = create.pitch;

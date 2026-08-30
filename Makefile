@@ -103,13 +103,17 @@ endif
 # ---------------------------------------------------------------------------
 # 外部依赖
 # ---------------------------------------------------------------------------
-# Step 1 只要 libdrm。Step 2 起往 PKGS 里加 gbm / egl / glesv2。
+# Step 1 只要 libdrm。Step 2 起加 gbm / egl / glesv2。
+#
+# 这些是**构建期**依赖，不代表运行期一定可用：EGL 扩展、可分配的 modifier、
+# 能不能跨设备导入，全部由 mw/render/probe 在运行时探测。
+# 链上不等于能用，这条界线不要模糊。
 #
 # **必须用 -isystem 而不是 -I**：libdrm 的 fourcc_code() / fourcc_mod_code()
 # 宏体里是 C 风格强转，用 -I 引入会被 -Wold-style-cast 打中，
 # 而那不是我们能改的代码。-isystem 让 GCC 忽略系统头里展开的宏产生的告警。
 
-PKGS       := libdrm
+PKGS       := libdrm gbm egl glesv2
 PKG_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(PKGS) 2>/dev/null | sed 's/-I/-isystem /g')
 PKG_LIBS   := $(shell $(PKG_CONFIG) --libs   $(PKGS) 2>/dev/null)
 
