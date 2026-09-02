@@ -203,11 +203,29 @@ Result<Framebuffer> Framebuffer::add_with_fallback(BorrowedFd fd, const Framebuf
                        errno_name(err), desc.to_string()));
     }
 
-    // 勘察结果里 vsdrm 的私有 modifier 走 WithModifiers 就是返回 EINVAL。
-    // 这条路径的意义是让上层在驱动还没实现某个 modifier 时仍能出画面，
-    // 而不是静默地假装成功 —— 所以要 WARN，不能悄悄降级。
-    LOG_WARN("AddFB2WithModifiers rejected modifier {} ({}), retrying without modifier info",
-             to_string(desc.modifiers[0]), errno_name(err));
+    // **只有线性排布才允许丢掉 modifier。**
+    //
+    // 丢掉 modifier 意味着让驱动自己推断排布。这块内存如果本来就是线性的，
+    // 驱动推断出线性，结果正确；如果它是 tiling 或压缩的，驱动会按线性去读，
+    // **屏幕上出来的是垃圾，而且 addfb2 返回成功** —— 一个静默的错误结果，
+    // 比一个响亮的失败糟糕得多。
+    //
+    // 所以非线性 modifier 被拒时不降级，直接失败，让调用方去换一个 modifier
+    // 重新分配（见 render/buffer_source.cpp 的重试循环）。
+    if (desc.modifiers[0] != kModifierLinear) {
+        return Err(Errc::AddFbFailed,
+                   fmt("drmModeAddFB2WithModifiers rejected modifier {} with {}; refusing to "
+                       "retry without modifier info because this layout is not linear -- the "
+                       "driver would misread the memory and put garbage on screen. Allocate "
+                       "with a different modifier instead: {}",
+                       to_string(desc.modifiers[0]), errno_name(err), desc.to_string()));
+    }
+
+    // 到这里 modifier 是 LINEAR。丢掉它让驱动自己推断，绝大多数驱动会推断出
+    // 线性，所以结果正确。仍然要 WARN：这是一条假设，不是保证。
+    LOG_WARN("AddFB2WithModifiers rejected LINEAR ({}), retrying without modifier info; "
+             "the driver will infer the layout and is expected to infer linear",
+             errno_name(err));
 
     FramebufferDesc plain = desc;
     for (auto& modifier : plain.modifiers) {

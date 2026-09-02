@@ -105,6 +105,7 @@ struct Options {
     DrawKind draw = DrawKind::Cpu;
     uint64_t frame_limit = 0;
     uint32_t buffer_count = 2;
+    std::vector<std::string> skip_nodes{};
     bool no_modifiers = false;
     bool dry_run = false;
 };
@@ -113,7 +114,9 @@ void print_usage(const char* argv0) {
     std::printf("usage: %s [options]\n", argv0);
     std::printf("  -d <name>       open the KMS node by DRM driver name\n");
     std::printf("  -D <path>       open a specific KMS node\n");
-    std::printf("  -g <path>       node for GBM/EGL (default: probe every node and pick)\n");
+    std::printf("  -g <path>       node for GBM/EGL (default: probe every node and pick;\n");
+    std::printf("                  passing it explicitly skips the whole probe)\n");
+    std::printf("  -x <path>       do not probe this node (repeatable)\n");
     std::printf("  -s <kind>       allocation source: scanout | render (default scanout)\n");
     std::printf("  --draw <kind>   cpu | gl (default cpu)\n");
     std::printf("  -f <n>          stop after n frames\n");
@@ -590,9 +593,12 @@ Result<std::string> pick_gl_node(const Device& kms, const Options& options) {
         return Ok(std::string(options.gbm_node));
     }
 
+    // 探测不是免费的：每个候选都要把一套用户态驱动加载进来跑一遍，
+    // 而且遇到会 oops 内核的驱动时每跑一次就多脏一点。
+    LOG_INFO("probing every node to find a GL host; pass -g <node> to skip this");
     render::GlNodeProbe probe;
-    probe.kms_fd = kms.fd();
     probe.kms_path = kms.path();
+    probe.skip = options.skip_nodes;
     const std::vector<render::GlNode> nodes = render::probe_gl_nodes(probe);
 
     LOG_INFO("GL host candidates:");
@@ -662,6 +668,21 @@ int run(const Options& options) {
         }
     }
 
+    // 渲染宿主节点只探一次，而且必须在本进程碰 EGL 之前 ——
+    // probe_gl_nodes() 会 fork，而 fork 一个已经带着 GL 上下文的进程，
+    // 子进程里的驱动状态是未定义的。
+    std::string gl_node_path;
+    const bool need_gl_node =
+        options.draw == DrawKind::Gl || options.source == render::SourceKind::RenderDevice;
+    if (need_gl_node) {
+        auto node_result = pick_gl_node(device, options);
+        if (! node_result) {
+            log_error_object(node_result.error(), "cannot find a node to render on");
+            return 1;
+        }
+        gl_node_path = std::move(node_result).value();
+    }
+
     // ---- 声明顺序即析构逆序，这里必须小心 ----
     // swapchain 里的 GL 对象归 EGL 上下文所有，fb 归 KMS device 所有，
     // imported handle 归 cache 所有。所以顺序是：
@@ -675,12 +696,7 @@ int run(const Options& options) {
     const bool need_gl = options.draw == DrawKind::Gl;
 
     if (need_gl) {
-        auto node_result = pick_gl_node(device, options);
-        if (! node_result) {
-            log_error_object(node_result.error(), "cannot find a node to render on");
-            return 1;
-        }
-        auto gbm_result = gbm::Device::open(node_result.value());
+        auto gbm_result = gbm::Device::open(gl_node_path);
         if (! gbm_result) {
             log_error_object(gbm_result.error(), "cannot create a GBM device for EGL");
             return 1;
@@ -709,15 +725,8 @@ int run(const Options& options) {
     // 分配来源。渲染侧分配需要一个 GBM 设备的节点路径 —— 这里传路径而不是
     // 复用上面那个 gbm_device，是因为"渲染的设备"和"分配的设备"在设计上
     // 就是解耦的，让它们各自打开自己的节点更能暴露耦合。
-    std::string alloc_node;
-    if (options.source == render::SourceKind::RenderDevice) {
-        auto node_result = pick_gl_node(device, options);
-        if (! node_result) {
-            log_error_object(node_result.error(), "cannot find a node to allocate on");
-            return 1;
-        }
-        alloc_node = std::move(node_result).value();
-    }
+    const std::string alloc_node =
+        options.source == render::SourceKind::RenderDevice ? gl_node_path : std::string();
 
     auto source_result =
         options.source == render::SourceKind::ScanoutDevice
@@ -788,7 +797,8 @@ int run(const Options& options) {
         return 1;
     }
     LOG_INFO("modeset committed; the display should be on");
-    chain.mark_submitted();
+    // modeset 这次提交没带 PAGE_FLIP_EVENT，不会有完成事件回来。
+    chain.mark_submitted(/*expects_event=*/false);
 
     // 初始化到此为止。之后每帧再出现 get_properties / addfb / prime
     // 就是热路径越界。
@@ -854,6 +864,10 @@ int main(int argc, char** argv) {
         }
         if (std::strcmp(arg, "-D") == 0 && i + 1 < argc) {
             options.device_path = argv[++i];
+            continue;
+        }
+        if (std::strcmp(arg, "-x") == 0 && i + 1 < argc) {
+            options.skip_nodes.emplace_back(argv[++i]);
             continue;
         }
         if (std::strcmp(arg, "-g") == 0 && i + 1 < argc) {

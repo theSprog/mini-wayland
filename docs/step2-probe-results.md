@@ -153,17 +153,137 @@ megadriver 构建，这五个名字是同一个 `.so` 的别名。
 - 枚举一次的 ioctl 成本：189 次；`PropertyDefCache` 省下 130 次
 - 当前 HDMI-A-1 接在 crtc#84，1920x1080@60
 
-## 八、跨设备传输：两个方向的现状
+## 八、GL 宿主与两个传输方向（实测表，2026-08-31）
 
-| 方向 | 结果 | 失败点 |
-| --- | --- | --- |
-| GPU 分配 → DPU 扫描（RenderDevice） | **EINVAL** | `drmPrimeFDToHandle(card2, fd)`。GBM 分配与导出都成功了 |
-| DPU 分配 → GPU 渲染（ScanoutDevice） | 待复核 | 新增的 GL render target 闸门专门测这条 |
+`probe_caps` 对每个节点真的建一次 GBM + EGL + 渲染目标，各跑在独立子进程里：
 
-第一条的失败点很具体：GPU 私有池分配的离散页，DPU 侧收不下 ——
-物理连续性要求，或未给 DPU 配 IOMMU 映射。dmesg 里驱动侧通常有更细的原因。
+```
+节点              驱动     gbm  egl  import  alloc  scanout  GL_RENDERER
+renderD128       hygpu    yes  yes  yes     no     no       softpipe
+renderD129       hantro   -    -    -       -      -        <驱动崩溃，SIGSEGV>
+renderD130       pvr      yes  yes  yes     yes    no       Hygon CJ
+card0            hygpu    yes  yes  yes     yes    no       softpipe
+card1            hantro   -    -    -       -      -        <驱动崩溃，SIGSEGV>
+card2            vsdrm    yes  yes  yes     yes    -        Hygon CJ   （就是显示设备）
+card3            pvr      yes  yes  yes     yes    no       Hygon CJ
+```
 
-**这不构成"锁死到某一个方向"的理由。** 两条路径的代码都在，
-可用性一律运行时探测。KMD / UMD / 硬件都还在演进，
-今天关着的门明天可能开 —— 这正是 `check-env.sh` 存在的意义：
-升级后重跑一次 diff，从 BLOCK 变 PASS 的就是新解锁的能力。
+- `import` = 外来 dmabuf 能被导入并绑成渲染目标（显示设备分配 → 本节点渲染）
+- `alloc` = 本节点能分配带 scanout 用途的 bo
+- `scanout` = 本节点分配的 bo 能被显示设备导入并注册成 fb
+
+### 结论一：硬件 GL 有三个入口，softpipe 有两个
+
+`Hygon CJ` / EGL 1.5 出现在 **card2、card3、renderD130**。
+`softpipe` / EGL 1.4 出现在 card0、renderD128 —— 那两个的 driver name 是
+`hygpu`，megadriver 里没有 `hygpu_dri.so`，所以退到软件后备。
+
+**显示节点 card2 上也能起硬件 GL**，这是个好消息：合成器可以在同一个设备上
+完成分配和渲染，整条跨设备导入都不需要。但**不能把架构建立在这一点上** ——
+它取决于这个 Mesa 构建把 `vsdrm` 这个名字映射到了硬件驱动，换个构建就没了。
+
+> 待查：在 pvr 节点（renderD130 / card3）上分配时会打
+> `MESA: error: ZINK: vkCreateImage failed`，card2 上不会。
+> `GL_RENDERER` 三者相同，说明最终用的不是 zink，但这条路径差异没查清。
+> 不影响结论，记一笔。
+
+### 结论二：两个方向
+
+| 方向 | 结果 |
+| --- | --- |
+| **显示设备分配 → GPU 渲染**（ScanoutDevice） | **通**。renderD130 / card3 / card2 上 `import=yes`，走首选的 renderbuffer 路径，不是 texture 降级 |
+| **GPU 分配 → 显示设备扫描**（RenderDevice） | **通**（2026-08-31 起）。KMD 修复跨设备导入后 `scanout=yes` |
+
+**两个方向现在都通，而且用户态代码一行没改。**
+早先第二条是 `drmPrimeFDToHandle(card2, fd)` 返回 EINVAL
+（GPU 私有池的离散页 DPU 收不下：物理连续性要求，或未配 IOMMU 映射）。
+KMD 修复后重跑 `probe_caps`，那条闸门自己从 DEGRD 变成了 PASS。
+
+这是把可用性做成**运行时探测**而不是编译期假设的直接收益：
+驱动的能力边界变了，代码不用动，重跑一次探测就知道多了什么。
+
+card2 那一行的 `scanout` 记成 `-` 而不是 `yes`：分配方就是显示设备自己，
+收得下是恒真的，不构成任何跨设备结论。早先的版本把它记成 `yes` 并计入排名，
+结果显示节点凭一条空结论压过了真正的渲染节点。
+
+### 结论三：Step 2 已经在当前环境端到端跑通（实测）
+
+`step2_gbm_scanout --draw gl`，1920x1080@60，HDMI-A-1 / crtc#84 / plane#87：
+
+```
+swapchain of 2 buffer(s):
+  [0] 1920x1080 XR24 stride=7680 modifier=INVALID fb#154 cpu=yes
+      render target 1920x1080 fbo=1 via renderbuffer
+  [1] ... fbo=2 via renderbuffer
+
+frames=269 fps=60.00 interval=16.666ms [16.335, 16.999] dropped=0
+  last second: 61 frames, ioctls: commit=61 flip=61
+```
+
+- **首选的 renderbuffer 路径**，没有降级到 texture
+- **稳态每帧恰好 1 次 atomic_commit + 1 次事件**，`add_fb` / `prime_*` 增量为 0
+- 帧间隔抖动 ±0.33ms，丢帧 0
+- 退出时 `create_dumb=3 / destroy_dumb=3`、`add_fb=2 / rm_fb=2`，全部配平
+
+分配走 ScanoutDevice（DPU 的 dumb buffer），渲染走 renderD130 的硬件 GL，
+中间靠 PRIME + EGLImage 连起来。RenderDevice 方向的代码保留不动，
+可用性运行时探测，见 `TODO(hw-import)`。
+
+> **modifier 这条线终于可以压测了。** primary plane 报了 14 个 XR24
+> modifier，但上面这次跑的是 ScanoutDevice（dumb 分配），
+> 没有 modifier 协商余地，swapchain 里全是 `modifier=INVALID`。
+>
+> RenderDevice 方向打开之后，`step2_gbm_scanout -s render --draw gl`
+> 会真正走一遍"候选列表 → GBM 挑一个 → addfb2 带着它"的完整链路。
+> **这一条还没跑过，是 Step 2 收尾前最后一项待办。**
+
+### 结论四：两个节点会把**内核**打 oops，不是用户态崩溃
+
+renderD129 / card1（`hantro`，视频编解码）在探测时把子进程打成 SIGSEGV。
+从 `waitpid` 看像用户态段错误，**实际上是内核 BUG_ON**：
+
+```
+hygpu: hantro: drm_gem_prime_fd_to_handle begin
+hygpu: hantro: hantro_drm_gem_prime_import Begin flag 0
+hygpu: hantro: drm_gem_prime_fd_to_handle end, fn 000000004f43f377 ret 0
+------------[ cut here ]------------
+kernel BUG at drivers/dma-buf/dma-buf.c:89!
+invalid opcode: 0000 [#1] SMP NOPTI
+RIP: 0010:dma_buf_release+0xd1/0xe0
+Call Trace:
+ __fput -> ____fput -> task_work_run -> exit_to_usermode_loop -> do_syscall_64
+```
+
+即：**把一块 dmabuf 导入 hantro 设备，然后关掉那个 fd，内核就 BUG_ON**。
+崩点在 `dma_buf_release`，触发路径是进程退出时的 `__fput`。
+第一次之后内核就带 `Tainted: G D` 了。
+
+三条推论：
+
+1. **`crashed` 的成因未必在用户态。** 内核 `BUG_ON` 把当前任务打成 SIGSEGV，
+   从 `waitpid` 看和用户态崩溃一模一样。探测器的报告因此改成提醒去看 dmesg ——
+   那是唯一能分开这两种情况的地方。
+2. **进程隔离仍然有效，但代价不为零。** 子进程被隔离了，内核没有。
+   每跑一次探测就多一次 oops。所以加了 `-x <path>` 显式排除口，
+   被跳过的节点会在表里标成 `<skipped>`，不会变成一条看不见的假设。
+3. **这是 vendor KMD 的 bug，不是本项目的问题**，按项目既定原则记录不修。
+   `hantro_drm_gem_prime_import` 建出来的 dma_buf 在释放路径上违反了
+   dma-buf 核心的某条不变量。
+
+日常跑建议：`probe_caps -x /dev/dri/renderD129 -x /dev/dri/card1`。
+
+独立复现程序在 `repro/dmabuf-import-bug/`：一个 `.c` 文件，只用 libc 和
+内核 DRM uapi，六步 ioctl，不经过任何图形栈。可以单独打包发给驱动同事。
+
+## 九、Step 6 的路线由此确定
+
+```
+card2      (vsdrm, KMS):    SYNCOBJ=0  SYNCOBJ_TIMELINE=0
+renderD130 (pvr,  GPU):     SYNCOBJ_TIMELINE=0
+renderD128 (hygpu):         SYNCOBJ=1  SYNCOBJ_TIMELINE=1   ← 不承载渲染，这行没有意义
+```
+
+- **合成器自身的显式同步**：`EGL_ANDROID_native_fence_sync` 取 fence fd
+  → plane 的 `IN_FENCE_FD`，回读走 `OUT_FENCE_PTR`。三样都在，**现在就能做**。
+- **`linux-drm-syncobj-v1` 协议侧**：承载渲染的节点没有 timeline syncobj，
+  提供不了，客户端退隐式同步。见 `TODO(syncobj-timeline)`。

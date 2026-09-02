@@ -145,19 +145,87 @@ class RenderDeviceSource final : public BufferSource {
         return SourceKind::RenderDevice;
     }
 
+    /**
+     * @brief 分配一块能被显示设备扫描的 buffer
+     *
+     * 这里有一个**协商循环**：分配器从候选 modifier 里挑一个，
+     * 显示设备可能不接受它（IN_FORMATS 说支持、addfb2 又拒绝，
+     * 在开发中的驱动上真的会发生）。这时候正确的动作不是丢掉 modifier
+     * 硬上 —— 那会让驱动按错误的排布去读内存，屏幕上出垃圾而没有任何报错 ——
+     * 而是**把这个 modifier 从候选里去掉，重新分配**。
+     *
+     * 候选用完之后退到不带 modifier 的分配。那条路两端各自推断排布，
+     * 不保证一致，所以会 WARN。
+     *
+     * 被拒绝的 modifier 会被记录并打出来：这份数据正是 Step 4 的
+     * dmabuf-feedback tranche 策略需要的输入 —— 哪些 modifier
+     * 名义上支持、实际不能用于扫描输出。
+     */
     Result<ScanoutBuffer> allocate(const AllocRequest& req) override {
+        std::vector<Modifier> candidates(req.modifiers.begin(), req.modifiers.end());
+        std::vector<Modifier> rejected;
+
+        for (;;) {
+            bool modifier_rejected = false;
+            Modifier chosen = drm::kModifierInvalid;
+            auto result = try_allocate(req, span<const Modifier>(candidates.data(),
+                                                                 candidates.size()),
+                                       modifier_rejected, chosen);
+            if (result) {
+                if (! rejected.empty()) {
+                    LOG_INFO("the scanout device rejected {} advertised modifier(s) before "
+                             "settling on {}", rejected.size(), drm::to_string(chosen));
+                    for (const Modifier bad : rejected) {
+                        LOG_INFO("  rejected: {}", drm::to_string(bad));
+                    }
+                }
+                return result;
+            }
+            if (! modifier_rejected || candidates.empty()) {
+                return result;
+            }
+
+            // 把被拒的那个从候选里去掉再来一次。
+            const size_t before = candidates.size();
+            candidates.erase(std::remove(candidates.begin(), candidates.end(), chosen),
+                             candidates.end());
+            if (candidates.size() == before) {
+                // 没删掉任何东西说明分配器挑的不在候选列表里，再循环也不会收敛。
+                LOG_WARN("the allocator chose modifier {} which is not in the candidate list; "
+                         "stopping the negotiation loop",
+                         drm::to_string(chosen));
+                return result;
+            }
+            rejected.push_back(chosen);
+            LOG_WARN("the scanout device rejected modifier {}; retrying with {} candidate(s) "
+                     "left", drm::to_string(chosen), candidates.size());
+        }
+    }
+
+  private:
+    /// 一次尝试。modifier_rejected 为 true 表示"换一个 modifier 可能有救"。
+    Result<ScanoutBuffer> try_allocate(const AllocRequest& req, span<const Modifier> modifiers,
+                                       bool& modifier_rejected, Modifier& chosen) {
+        modifier_rejected = false;
+
         gbm::Usage usage = gbm::Usage::Scanout | gbm::Usage::Rendering;
         if (req.need_cpu_write) {
             usage = usage | gbm::Usage::CpuWrite;
         }
+        if (modifiers.empty() && ! req.modifiers.empty()) {
+            LOG_WARN("every advertised modifier was rejected; falling back to allocation "
+                     "without modifiers -- the allocator and the display driver will each "
+                     "infer a layout independently, and nothing guarantees they agree");
+        }
 
-        auto buffer_result = device_.allocate(req.size, req.format, req.modifiers, usage);
+        auto buffer_result = device_.allocate(req.size, req.format, modifiers, usage);
         if (! buffer_result) {
             return Err(drm::Errc::Unsupported,
                        fmt("allocation on the render device failed: {}",
                            buffer_result.error().message));
         }
         gbm::Buffer buffer = std::move(buffer_result).value();
+        chosen = buffer.modifier();
 
         // stride 是分配器定的，未必满足显示设备的要求。内核对此往往只回一个
         // 看不出原因的 EINVAL，所以在 addfb2 之前先自己查一遍。
@@ -181,6 +249,9 @@ class RenderDeviceSource final : public BufferSource {
         bool downgraded = false;
         auto fb_result = drm::import_as_framebuffer(kms_fd_, cache_, desc, &downgraded);
         if (! fb_result) {
+            // 带着一个非 INVALID 的 modifier 失败，才值得换一个再试。
+            // 不带 modifier 还失败的话，问题不在 modifier 上。
+            modifier_rejected = chosen != drm::kModifierInvalid;
             return Err(drm::Errc::AddFbFailed,
                        fmt("the scanout device would not accept the buffer: {}. "
                            "Check the kernel log; drivers often log the real reason there "
@@ -199,6 +270,7 @@ class RenderDeviceSource final : public BufferSource {
         return Ok(ScanoutBuffer(std::move(state)));
     }
 
+  public:
     std::vector<Modifier> available_modifiers(Format format) const override {
         // GBM 没有"列出全部可用 modifier"的接口，只能逐个问。
         // 所以这里的输入必须由调用方给（通常是 plane 的 IN_FORMATS），

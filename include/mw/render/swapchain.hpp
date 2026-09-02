@@ -125,8 +125,18 @@ class Swapchain {
     /// 按下标访问，诊断与启动阶段用。越界返回 nullptr。
     Slot* at(uint32_t index) noexcept;
 
-    /// 标记 acquire() 返回的那个已经提交，轮转到下一个
-    void mark_submitted() noexcept;
+    /**
+     * @brief 标记 acquire() 返回的那个已经提交，轮转到下一个
+     *
+     * @param expects_event 这次提交带了 PAGE_FLIP_EVENT 吗
+     *
+     *        modeset 那一次提交**不带**完成事件：它让第一块 buffer 开始被扫描
+     *        （所以确实要轮转），但内核永远不会为它投递 flip 事件。
+     *        传 true 的话 in_flight 会永久性地多 1，退出时那句
+     *        "N 次提交还在飞"就一直多报一次 —— 一个恒定的偏差比没有计数
+     *        更糟，因为它看起来像真的。
+     */
+    void mark_submitted(bool expects_event = true) noexcept;
 
     /// 收到 page flip 完成事件时调用
     void on_flip_complete() noexcept;

@@ -5,3 +5,4 @@ compile_commands.json
 *.d
 *.a
 /mini-wayland.tar
+/repro/

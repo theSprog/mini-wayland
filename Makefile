@@ -3,7 +3,6 @@
 ##   make                     BUILD=debug, static lib + all demos
 ##   make BUILD=release
 ##   make SANITIZE=1          ASan + UBSan
-##   make WERROR=1            warnings become errors (run before committing)
 ##   make check-headers       compile every .hpp on its own
 ##   make tidy                clang-tidy (skipped if not installed)
 ##   make cppcheck
@@ -19,7 +18,6 @@
 PROJECT    := mini-wayland
 BUILD      ?= debug
 V          ?= 0
-WERROR     ?= 0
 SANITIZE   ?= 0
 EXCEPTIONS ?= 0
 
@@ -72,9 +70,7 @@ WARN += -Werror=return-type                 \
         -Werror=vla                         \
         -Werror=implicit-fallthrough
 
-ifeq ($(WERROR),1)
-  WARN += -Werror
-endif
+WARN += -Werror
 
 CXXSTD   := -std=c++17
 

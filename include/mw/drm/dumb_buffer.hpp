@@ -191,7 +191,10 @@ class DumbBufferChain {
     DumbBuffer& acquire() noexcept;
 
     /// 标记 acquire() 返回的那个已经提交，轮转到下一个
-    void mark_submitted() noexcept;
+    /// @param expects_event 这次提交带了 PAGE_FLIP_EVENT 吗。modeset 那一次
+    ///        不带：它让第一块 buffer 开始被扫描（要轮转），但内核不会为它
+    ///        投递 flip 事件，计入 in_flight 会造成一个恒定的偏差。
+    void mark_submitted(bool expects_event = true) noexcept;
 
     /// 收到 page flip 完成事件时调用，释放上上一帧
     void on_flip_complete() noexcept;

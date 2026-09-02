@@ -39,6 +39,12 @@ make V=1
 ./build/debug/bin/probe_caps       # 同上，只跑闸门部分
 ./build/debug/bin/probe_caps -s 6  # 只看某一步的闸门
 ./build/debug/bin/probe_caps -r /dev/dri/renderDNNN  # 强制指定 GL 宿主节点
+./build/debug/bin/probe_caps --no-isolate  # 不 fork，给 gdb 看崩在哪用
+./build/debug/bin/probe_caps -x /dev/dri/renderD129 -x /dev/dri/card1  # 排除会 oops 内核的节点
+
+# vendor KMD bug 的独立复现（不依赖本项目，可单独打包发给驱动同事）
+sudo repro/dmabuf-import-bug/run.sh -i renderD129 -s 0   # 对照，必须不崩
+sudo repro/dmabuf-import-bug/run.sh -i renderD129 -s 3   # 触发 BUG_ON
 
 ./build/debug/bin/step2_prime_roundtrip            # PRIME 导出/导入正确性
 ./build/debug/bin/step2_prime_roundtrip -s 1920x1080   # 用真实分辨率压 stride 对齐
@@ -56,7 +62,7 @@ sudo ./build/debug/bin/step1_kms_atomic_dumb -d vkms
 sudo ./build/debug/bin/step2_gbm_scanout --dry-run          # 只做 TEST_ONLY
 sudo ./build/debug/bin/step2_gbm_scanout                    # 显示侧分配 + CPU 绘制
 sudo ./build/debug/bin/step2_gbm_scanout --draw gl          # 同上，改用 GLES 绘制
-sudo ./build/debug/bin/step2_gbm_scanout -s render          # 渲染侧分配（GBM）
+sudo ./build/debug/bin/step2_gbm_scanout -s render --draw gl  # 渲染侧分配 + GL（modifier 链路）
 sudo ./build/debug/bin/step2_gbm_scanout --no-modifiers     # 模拟无 IN_FORMATS 的驱动
 sudo ./build/debug/bin/step2_gbm_scanout -g /dev/dri/card2  # 指定 GBM/EGL 用哪个节点
 ```
@@ -215,9 +221,11 @@ VKMS 过而 vsdrm 不过 ⇒ 大概率 KMD 问题；反过来 ⇒ 代码有 vend
   - [x] `mw/render/swapchain`（N 组 buffer + 渲染目标的轮转）
   - [x] `demos/step2_gbm_scanout`：`--draw cpu|gl`、`-s scanout|render`、`--no-modifiers`
   - [x] `mw/render/gl_node`：实测哪个节点能跑 GL，不用元数据配对
-  - [ ] 板上双环境验收（VKMS 只测 Step 1 回归，vsdrm 测端到端）
-  - [ ] 把闸门结果写回 `docs/step2-probe-results.md`
-  - [ ] `learning-notes/02-*.md`
+  - [x] 板上闸门探测：硬件 GL 在 renderD130 / card3 / card2，显示侧分配 → GL 渲染方向打通
+  - [x] 板上端到端验收：1920x1080@60，269 帧 0 丢帧，稳态每帧仅 1 次 atomic_commit
+  - [x] 闸门与端到端结果写回 `docs/step2-probe-results.md`
+  - [x] `learning-notes/02-让-GPU-参与进来.md`
+  - [ ] `-s render --draw gl` 端到端跑一次 —— 验收清单见 `docs/step2-render-path-acceptance.md`
 - [ ] Step 3：DMA-BUF 跨进程 direct scanout
 - [ ] Step 4：最小 wayland server
 - [ ] Step 5：硬件 plane 分配器（TEST_ONLY 试探 + 降级）

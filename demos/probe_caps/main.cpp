@@ -248,7 +248,13 @@ void check_step2(Report& report, const drm::Device& device,
 
     Verdict export_verdict = Verdict::Blocked;
     std::string export_detail;
-    if (gl_node->scanout_accepted_by_kms) {
+    if (gl_node->same_device_as_kms) {
+        // 分配方就是显示设备自己，收得下是恒真的。报成 PASS 会让人以为
+        // 跨设备那条路通了。
+        export_verdict = Verdict::Skipped;
+        export_detail = "the GL host is the display device itself, so this says nothing "
+                        "about cross-device import; force another node with -r to test it";
+    } else if (gl_node->scanout_accepted_by_kms) {
         export_verdict = Verdict::Pass;
         export_detail = "the display device imports and scans out GL-host allocations";
     } else if (gl_node->allocates_scanout) {
@@ -357,6 +363,10 @@ void print_usage(const char* argv0) {
     std::printf("  -r <path>   force the GL host node (default: probe every node)\n");
     std::printf("  -s <n>      only check the gates for step n\n");
     std::printf("  -q          terse output\n");
+    std::printf("  -x <path>   do not probe this node (repeatable; use it for a node\n");
+    std::printf("              whose driver oopses the kernel)\n");
+    std::printf("  --no-isolate  probe GL nodes in-process (for gdb; one bad driver\n");
+    std::printf("                takes the whole tool down)\n");
     std::printf("  -h          this help\n");
     std::printf("\nallocates small buffers to test what queries cannot answer.\n");
     std::printf("does not modeset and does not take DRM master.\n");
@@ -369,6 +379,8 @@ int main(int argc, char** argv) {
     std::string render_node;
     int only_step = 0;
     bool quiet = false;
+    bool isolate = true;
+    std::vector<std::string> skip_nodes;
 
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
@@ -378,6 +390,14 @@ int main(int argc, char** argv) {
         }
         if (std::strcmp(arg, "-q") == 0) {
             quiet = true;
+            continue;
+        }
+        if (std::strcmp(arg, "-x") == 0 && i + 1 < argc) {
+            skip_nodes.emplace_back(argv[++i]);
+            continue;
+        }
+        if (std::strcmp(arg, "--no-isolate") == 0) {
+            isolate = false;
             continue;
         }
         if (std::strcmp(arg, "-d") == 0 && i + 1 < argc) {
@@ -411,12 +431,14 @@ int main(int argc, char** argv) {
     // 后面 step 2 和 step 6 的好几条闸门都取决于它，问错节点会一路带偏。
     // 见 render/gl_node.hpp。
     render::GlNodeProbe gl_probe;
-    gl_probe.kms_fd = device.fd();
     gl_probe.kms_path = device.path();
+    gl_probe.isolate = isolate;
+    gl_probe.skip = skip_nodes;
     const std::vector<render::GlNode> gl_nodes = render::probe_gl_nodes(gl_probe);
 
     LOG_INFO("");
     LOG_INFO("--- GL host candidates ---");
+    LOG_INFO("  each one is tried for real, in its own process");
     for (const auto& node : gl_nodes) {
         LOG_INFO("  {}", node.to_line());
         if (! node.detail.empty()) {

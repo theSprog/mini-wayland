@@ -214,9 +214,11 @@ DumbBuffer& DumbBufferChain::acquire() noexcept {
     return buffers_[next_];
 }
 
-void DumbBufferChain::mark_submitted() noexcept {
+void DumbBufferChain::mark_submitted(bool expects_event) noexcept {
     next_ = (next_ + 1u) % count_;
-    ++in_flight_;
+    if (expects_event) {
+        ++in_flight_;
+    }
 }
 
 void DumbBufferChain::on_flip_complete() noexcept {

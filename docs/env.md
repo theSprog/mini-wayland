@@ -67,15 +67,27 @@ drm_file。跨节点用 buffer 只能走 PRIME。
 
 | 方向 | 当前实测 | 说明 |
 | --- | --- | --- |
-| DPU 分配 → GPU 导入渲染（ScanoutDevice） | 待复核 | 新增的 GL render target 闸门专门测这条 |
-| GPU 分配 → DPU 导入扫描（RenderDevice） | **EINVAL** | GBM 分配与导出都成功，`drmPrimeFDToHandle` 在 card2 上被拒 |
+| 显示设备分配 → GPU 渲染（ScanoutDevice） | **通** | renderD130 / card3 / card2 上导入成功，走首选的 renderbuffer 路径 |
+| GPU 分配 → 显示设备扫描（RenderDevice） | **通**（2026-08-31 起） | KMD 修复跨设备导入后打开 |
 
-失败点是 `drmPrimeFDToHandle(card2, fd) = -EINVAL`：GPU 私有池分配的
-离散页，DPU 侧收不下（物理连续性要求，或未给 DPU 配 IOMMU 映射）。
+**两个方向现在都通。** 这是驱动演进的结果，不是代码变化的结果 ——
+早先 `drmPrimeFDToHandle(card2, fd)` 返回 EINVAL，KMD 侧修复后同一份
+用户态代码直接从 DEGRD 变 PASS。这正是把可用性做成运行时探测
+（而不是编译期假设或写死的路径选择）的收益。
 
-**不因此把代码锁死到单一方向。** 两条路径都保留在 `mw/render/buffer_source.hpp`
-里，可用性一律运行时探测。KMD / UMD / 硬件都还在演进，今天关着的门明天可能开。
-见 `TODO(hw-import)`。
+历史记录：修复前的失败点是 GPU 私有池分配的离散页 DPU 侧收不下
+（物理连续性要求，或未给 DPU 配 IOMMU 映射）。留着这条是因为
+换一块板子还会遇到同样的形状。
+
+### 关键点四：显示节点上也能起硬件 GL
+
+`card2` 上 GBM + EGL 起来之后 `GL_RENDERER = "Hygon CJ"`、EGL 1.5，
+与 renderD130 相同。也就是说合成器可以在同一个设备上完成分配和渲染，
+跨设备导入整个不需要。
+
+**但架构不建立在这一点上。** 它取决于这个 Mesa 构建把 `vsdrm` 这个名字
+映射到了硬件驱动，换个构建、换块板子就没了。默认仍然按"分配设备与渲染设备
+可能不同"来写，`probe_gl_nodes()` 每次实测决定用哪个。
 
 ## 三、card2 (vsdrm) KMS 资源
 
@@ -223,7 +235,8 @@ EGL_KHR_fence_sync / EGL_KHR_wait_sync
 | 3 | 无 debugfs（`CONFIG_DEBUG_FS` 未开） | 未解决 | CRC 自动化校验推迟到 v11 |
 | 4 | Vulkan 不可用（无 hygon ICD） | 未解决 | fallback 渲染器用 GLES3 |
 | 5 | Mesa 22.3.5 偏旧 | 未解决 | `linux-drm-syncobj-v1` 客户端支持需 Mesa 24.1+，Step 6 自写测试客户端 |
-| 6 | IN_FORMATS 解析验证 | **已确认**。`probe_kms -F` 自校验全部通过 | 8 个 plane 的 blob 全部内部自洽（popcount 总和与解析出的 pair 数一致）。早期文档记录的"只有 3 个 modifier"是截断，实际 plane#34/44/87/97 各有 17 个 |
+| 6 | hantro 节点（renderD129 / card1）导入 dmabuf 后关 fd，**内核 BUG_ON**（`dma_buf_release`，`dma-buf.c:89`） | 未解决，**已隔离** | vendor KMD bug，按项目原则不修。`probe_gl_nodes()` 每个候选跑在独立子进程里；子进程被隔离了但内核没有，所以日常跑加 `-x /dev/dri/renderD129 -x /dev/dri/card1` |
+| 7 | IN_FORMATS 解析验证 | **已确认**。`probe_kms -F` 自校验全部通过 | 8 个 plane 的 blob 全部内部自洽（popcount 总和与解析出的 pair 数一致）。早期文档记录的"只有 3 个 modifier"是截断，实际 plane#34/44/87/97 各有 17 个 |
 
 关于问题 1 的补充观察（供参考，非结论）：
 dmesg 显示 EBUSY 时 crtc#84 的 vblank 仍在持续更新（每 16.6ms 一次），
@@ -254,14 +267,13 @@ TODO(dc-info-blob): CRTC 的 DC_INFO blob（36 字节）内容未知，可能含
                     max_blend_layer 之类的整机限制。Step 5 之前解一次。
 TODO(dc-exception): 硬件异常（含 BE_UNDERRUN）经 SIGUSR2 上报，机制不适合
                     合成器直接用。等驱动侧改成 DRM event 再接。
-TODO(hw-import):    GPU 分配 -> DPU 导入（RenderDevice 方向）目前
-                    drmPrimeFDToHandle 返回 EINVAL。两条方向的代码都在，
-                    可用性运行时探测；KMD 演进后重跑 probe_caps 即可。
+(已关闭) TODO(hw-import):  GPU 分配 -> DPU 导入。2026-08-31 KMD 修复后通过，
+                    用户态代码未改动。
 TODO(syncobj-timeline): 渲染节点 renderD130 报 SYNCOBJ_TIMELINE=0，
                     linux-drm-syncobj-v1 暂时提供不了。合成器自身的显式同步
                     走 EGL_ANDROID_native_fence_sync + IN_FENCE_FD，不受影响。
-TODO(hw-gl):        GL 路径的帧率 / 丢帧指标，等硬件 GL 在端到端链路上
-                    跑通后再定量。
+TODO(kmd-hantro):   hantro 节点导入 dmabuf 后关 fd 会 BUG_ON 内核
+                    （dma_buf_release）。与本项目无关，用 -x 排除。
 ```
 
 ## 八、常用命令

@@ -87,12 +87,14 @@ Swapchain::Slot* Swapchain::at(uint32_t index) noexcept {
     return &slots_[index];
 }
 
-void Swapchain::mark_submitted() noexcept {
+void Swapchain::mark_submitted(bool expects_event) noexcept {
     if (count_ == 0u) {
         return;
     }
     next_ = (next_ + 1u) % count_;
-    ++in_flight_;
+    if (expects_event) {
+        ++in_flight_;
+    }
 }
 
 void Swapchain::on_flip_complete() noexcept {

@@ -459,7 +459,8 @@ int run(const Options& options) {
     }
     LOG_INFO("modeset committed; the display should be on");
     LOG_INFO("from here on, atomic_commit should equal: 1 modeset + N frames + 1 teardown");
-    chain.mark_submitted();
+    // modeset 这次提交没带 PAGE_FLIP_EVENT，不会有完成事件回来。
+    chain.mark_submitted(/*expects_event=*/false);
 
     // 初始化阶段到此为止。之后每帧再出现 get_properties / get_resources
     // 就是热路径越界，check_sealed() 会在循环里抓出来。
