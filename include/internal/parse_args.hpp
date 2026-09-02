@@ -18,6 +18,9 @@
 
 namespace internal {
 
+namespace parse_args {
+
+
 template<typename T>
 inline constexpr bool always_false_v = false;
 
@@ -398,5 +401,6 @@ private:
     std::vector<std::pair<std::string, std::string>> examples_;
     std::vector<std::string> notes_;
 };
+}   // namespace parse_args
 
-} // namespace internal
+}   // namespace internal
