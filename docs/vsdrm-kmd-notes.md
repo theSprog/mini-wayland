@@ -471,3 +471,80 @@ echo 0    | sudo tee /sys/module/drm/parameters/debug
 | 6 | hygpu GBM 分配的 stride 是否 64 对齐 | 分配后打 `gbm_bo_get_stride()` |
 
 第 1 条优先级最高 —— 它决定 Step 2 的整体路线。
+
+## prime 导入：无 page 的 sg_table 导致 GTT 映射全零（2026-09-03）
+
+### 现象
+
+从 pvr（renderD130）分配、导入 card2、上屏：`PRIME_FD_TO_HANDLE` /
+`addfb2` / `TEST_ONLY` / page flip 全部返回成功，60 fps 一帧不掉，
+退出配平，**屏幕全黑**。
+
+### 根因：四个各自正确的环节撞在一起
+
+1. **pvr 导出的是无 `struct page` 的 sg_table。**
+   `PVRDmaBufOpsMapCommon()` 只能从 `PMR_DevPhysAddr()` 拿到设备物理地址
+   （PMR 抽象层要同时覆盖 LMA 和 UMA 后端），所以只填
+   `sg_dma_address()` / `sg_dma_len()`，不调 `sg_set_page()`。
+   `sg_page()` 是 NULL，`sg->length` 是 0。
+   **这符合 dma-buf 规范** —— 导入方本来就只应使用 DMA 侧字段。
+   实测内存全部落在 System RAM（`0K cma-reserved`，无 carveout），
+   所以不是"拿不到 page"，是这层抽象拿不到。
+
+2. **amdgpu 调的是现代 API，写法正确**
+   （`amd/amdgpu/amdgpu_ttm.c:1005`、`:1145`）：
+   `drm_prime_sg_to_dma_addr_array(ttm->sg, gtt->ttm.dma_address, ttm->num_pages)`
+
+3. **kcl 垫片把它转发给了 5.4 的老函数**
+   （`include/kcl/kcl_drm_prime.h:12`）：
+   `return drm_prime_sg_to_page_addr_arrays(sgt, NULL, addrs, max_entries);`
+
+4. **5.4 的老实现用 `sg->length` 驱动循环。**
+   传 `pages = NULL` 只跳过了填 page 数组，循环次数仍由 `sg->length` 决定。
+   `sg->length == 0` → 内层 while 零次 → `dma_address[]` 保持全零 → **返回 0**。
+   `hy_uvm_va_map_to_gpu()` 拿这个全零数组建页表。
+
+上游 5.9/5.10 正是为此把原函数拆成 page 和 dma 两条独立循环，
+之后才有了 `drm_prime_sg_to_dma_addr_array()`。
+**这个垫片把新 API 的名字接到了老实现的 bug 上。**
+
+### 修复
+
+改垫片（`amdgpu_ttm.c` 两处一起好），按 DMA 侧字段遍历，
+段长不对齐或填不满 `max_entries` 一律 `-EINVAL`，不凑合建映射。
+完整补丁见 `repro/vsdrm-pageless-sgt/README.md`。
+
+注意 `uiDevPageSize = 1 << PMR_GetLog2Contiguity(psPMR)` **不一定等于
+`PAGE_SIZE`**。补丁按 `PAGE_SIZE` 步进展开，设备页更大时正确，
+更小时对齐检查会失败。
+
+### 诊断方法留档
+
+`hy_uvm_import_sgt()` 里 `ttm_bo_validate()` 之后，把"sg_table 说的"和
+"页表里填的"打在同一行，加一个非零计数：
+
+    vsdrm-diag: sgt says first=0x1a643c000 nents=5 total=8294400 |
+                ttm page table dma[0]=0x0 nonzero=0/2025
+
+`nonzero=0/2025` 是不需要解释的证据。分两行打对方可以争辩。
+
+**不要在这条路上 `kmap_atomic(sg_page(sgl))`** —— `sg_page()` 是 NULL，
+`page_address()` 算出来的地址不成立，会 GPF（踩过一次）。
+
+本地 backport 的是现代 TTM，`ttm_dma_tt` 已并入 `ttm_tt`，
+`dma_address` 直接挂在 `struct ttm_tt` 上，没有 `container_of`。
+
+### 遗留
+
+- `amd/dpu/verisilicon/vs_gem.c:223` / `:826` 仍在调
+  `drm_prime_sg_to_page_addr_arrays(sgt, vs_obj->pages, ...)`，要的是
+  **page 数组**，在同样的导出方上会拿到全 NULL 且静默成功 —— 同一个 bug
+  的另一个出口。建议 `if (!sg_page(sgt->sgl)) return -EOPNOTSUPP;`
+- `TODO(kernel-6.6)`：升级后垫片不再编译，走原生
+  `drm_prime_sg_to_dma_addr_array()`。**要重新验一遍。**
+- pvr 的 `mmap(dmabuf_fd)` 被 `PMRMMapPMR()` 的
+  `PVRSRV_CHECK_CPU_READABLE(psPMR->uiFlags)` 挡掉。这是 PMR 分配时的
+  flag，**不是硬性质**。能让 zink 分配时带上 CPU-readable 的话，
+  `--verify` 的第三条通道就能拿回来 —— 那是唯一一条不依赖内核插桩就能
+  验证跨设备 buffer 内容的路。代价可能是拿不到某些 tiling，
+  和 Step 4 的 tranche 权衡是同一组问题。

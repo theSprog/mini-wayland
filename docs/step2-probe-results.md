@@ -182,60 +182,79 @@ card3            pvr      yes  yes  yes     yes    no       Hygon CJ
 完成分配和渲染，整条跨设备导入都不需要。但**不能把架构建立在这一点上** ——
 它取决于这个 Mesa 构建把 `vsdrm` 这个名字映射到了硬件驱动，换个构建就没了。
 
-> 待查：在 pvr 节点（renderD130 / card3）上分配时会打
-> `MESA: error: ZINK: vkCreateImage failed`，card2 上不会。
-> `GL_RENDERER` 三者相同，说明最终用的不是 zink，但这条路径差异没查清。
-> 不影响结论，记一笔。
+### pvr 节点上的 GL 是 zink，不是原生 PowerVR GL 驱动
 
-### 结论二：两个方向
+`MESA: error: ZINK: vkCreateImage failed` 这串只可能来自 Mesa 的 zink 驱动，
+所以 renderD130 / card3 上的 Gallium 驱动是 **zink**，`GL_RENDERER` 显示的
+`Hygon CJ` 是它底下那个 Vulkan 设备的名字。
+
+card2 上不打这条，只是因为那条路径没走 GBM 分配（用的是 dumb buffer），
+不代表它不是 zink。
+
+三个下游影响：
+
+- **modifier 支持面是 zink 的**，受限于 `VK_EXT_image_drm_format_modifier`，
+  不是 PowerVR GL 的。实测 14 个候选里一个非线性的都挑不出来，恒定收敛到
+  LINEAR，每次分配伴随 2～4 次 `vkCreateImage` 失败后重试。
+- 分配失败后 zink 会自己重试并成功，所以那几条 ERROR **不是致命的**，
+  但会让首帧分配变慢。
+- Step 6 的显式同步要经过 zink 的 Vulkan semaphore ↔ syncobj 转换，
+  不是 GL fence 扩展。见 `TODO(step6)`。
+
+
+### 结论二：两个方向，以及一次假的"通"
 
 | 方向 | 结果 |
 | --- | --- |
-| **显示设备分配 → GPU 渲染**（ScanoutDevice） | **通**。renderD130 / card3 / card2 上 `import=yes`，走首选的 renderbuffer 路径，不是 texture 降级 |
-| **GPU 分配 → 显示设备扫描**（RenderDevice） | **通**（2026-08-31 起）。KMD 修复跨设备导入后 `scanout=yes` |
+| **显示设备分配 → GPU 渲染**（ScanoutDevice） | **通**。走首选的 renderbuffer 路径，不是 texture 降级 |
+| **GPU 分配 → 显示设备扫描**（RenderDevice） | **2026-09-03 起真正通**，见下 |
 
-**两个方向现在都通，而且用户态代码一行没改。**
-早先第二条是 `drmPrimeFDToHandle(card2, fd)` 返回 EINVAL
-（GPU 私有池的离散页 DPU 收不下：物理连续性要求，或未配 IOMMU 映射）。
-KMD 修复后重跑 `probe_caps`，那条闸门自己从 DEGRD 变成了 PASS。
+RenderDevice 方向有过两次状态变化，两次都值得留档：
 
-这是把可用性做成**运行时探测**而不是编译期假设的直接收益：
-驱动的能力边界变了，代码不用动，重跑一次探测就知道多了什么。
+**第一次（2026-08-31）**：早先 `drmPrimeFDToHandle(card2, fd)` 返回 EINVAL，
+KMD 修复后探测从 DEGRD 变成 PASS。
 
-card2 那一行的 `scanout` 记成 `-` 而不是 `yes`：分配方就是显示设备自己，
-收得下是恒真的，不构成任何跨设备结论。早先的版本把它记成 `yes` 并计入排名，
-结果显示节点凭一条空结论压过了真正的渲染节点。
+**第二次（2026-09-03）**：那个 PASS 是**假的**。`probe_export_direction()` 的
+判据止步于 `addfb2` 成功，而这条链路上：
 
-### 结论三：Step 2 已经在当前环境端到端跑通（实测）
+| 层 | 校验的东西 |
+| --- | --- |
+| `PRIME_FD_TO_HANDLE` | 内核建出了 GEM object |
+| `addfb2` | format / stride / size 自洽 |
+| `ATOMIC_TEST_ONLY` | plane 约束 |
+| page flip event | CRTC 翻页了 |
 
-`step2_gbm_scanout --draw gl`，1920x1080@60，HDMI-A-1 / crtc#84 / plane#87：
+**没有一层碰过像素。** 实际表现是 60 fps 一帧不掉、ioctl 完美配平、屏幕全黑。
+根因在 vsdrm 的 prime 导入路径（见 `vsdrm-kmd-notes.md`），
+本地打补丁后画面正常。
 
-```
-swapchain of 2 buffer(s):
-  [0] 1920x1080 XR24 stride=7680 modifier=INVALID fb#154 cpu=yes
-      render target 1920x1080 fbo=1 via renderbuffer
-  [1] ... fbo=2 via renderbuffer
+**这条结论的方法论代价要记住：能力探测如果只看返回码，
+就会在最需要它说实话的时候骗人。** `--verify` 补上了 buffer 那一侧，
+显示侧那一半仍然是空的。
 
-frames=269 fps=60.00 interval=16.666ms [16.335, 16.999] dropped=0
-  last second: 61 frames, ioctls: commit=61 flip=61
-```
+### 结论三：Step 2 端到端跑通（实测，2026-09-03）
 
-- **首选的 renderbuffer 路径**，没有降级到 texture
-- **稳态每帧恰好 1 次 atomic_commit + 1 次事件**，`add_fb` / `prime_*` 增量为 0
-- 帧间隔抖动 ±0.33ms，丢帧 0
-- 退出时 `create_dumb=3 / destroy_dumb=3`、`add_fb=2 / rm_fb=2`，全部配平
+`step2_gbm_scanout -s render --draw gl -f 600 -g /dev/dri/renderD130`，
+1920x1080@60，HDMI-A-1 / crtc#84 / plane#87：
 
-分配走 ScanoutDevice（DPU 的 dumb buffer），渲染走 renderD130 的硬件 GL，
-中间靠 PRIME + EGLImage 连起来。RenderDevice 方向的代码保留不动，
-可用性运行时探测，见 `TODO(hw-import)`。
+    swapchain of 2 buffer(s):
+      [0] 1920x1080 XR24 stride=7680 modifier=LINEAR fb#154 cpu=no
+          render target 1920x1080 fbo=1 via renderbuffer
+      [1] ... fbo=2 via renderbuffer
 
-> **modifier 这条线终于可以压测了。** primary plane 报了 14 个 XR24
-> modifier，但上面这次跑的是 ScanoutDevice（dumb 分配），
-> 没有 modifier 协商余地，swapchain 里全是 `modifier=INVALID`。
->
-> RenderDevice 方向打开之后，`step2_gbm_scanout -s render --draw gl`
-> 会真正走一遍"候选列表 → GBM 挑一个 → addfb2 带着它"的完整链路。
-> **这一条还没跑过，是 Step 2 收尾前最后一项待办。**
+    frames=600 fps=60.00 interval=16.666ms [16.150, 16.974] dropped=0
+      last second: 61 frames, ioctls: commit=61 flip=61
+
+- 分配在 renderD130（GBM），渲染在同一节点，扫描在 card2，全程 PRIME
+- **首选 renderbuffer 路径**，没有降级到 texture
+- 稳态每帧恰好 1 次 atomic_commit + 1 次事件，`add_fb` / `prime_*` 增量为 0
+- 退出配平：`add_fb=2 / rm_fb=2`、`prime_fd_to_handle=2 / gem_close=2`
+
+**modifier 协商链路实测结论**：primary plane 报 14 个 XR24 modifier，
+GBM（zink）从中恒定挑出 LINEAR。非线性的一个都拿不到，
+所以 `Framebuffer::add_with_fallback()` 的降级分支和 `TEST_ONLY` 对
+非线性 (format, modifier) 对的校验，在这套硬件上**仍然没有被覆盖到**。
+不是代码没写，是环境给不出输入。这一条要带进 Step 4。
 
 ### 结论四：两个节点会把**内核**打 oops，不是用户态崩溃
 
@@ -272,7 +291,7 @@ Call Trace:
 
 日常跑建议：`probe_caps -x /dev/dri/renderD129 -x /dev/dri/card1`。
 
-独立复现程序在 `repro/dmabuf-import-bug/`：一个 `.c` 文件，只用 libc 和
+独立复现程序在 `repro/vpu-import-bug/`：一个 `.c` 文件，只用 libc 和
 内核 DRM uapi，六步 ioctl，不经过任何图形栈。可以单独打包发给驱动同事。
 
 ## 九、Step 6 的路线由此确定

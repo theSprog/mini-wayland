@@ -137,6 +137,24 @@ class ScanoutBuffer {
      */
     Result<span<uint8_t>> map_write();
 
+    /**
+     * @brief 结束一次 CPU 写，释放映射
+     *
+     * 默认不需要调用：映射一直保持到析构，热路径上一次 map/unmap 都没有。
+     *
+     * **但"保持映射"隐含了一个假设：映射指向的就是 dmabuf 背后那块内存。**
+     * 这个假设在 dumb 路径上必然成立，在 GBM 路径上不一定 —— 底层资源不是
+     * host-visible 时，`gbm_bo_map()` 可能返回一块 staging buffer，真正的
+     * 拷回发生在 `gbm_bo_unmap()` 里。那种情况下不 unmap 就等于没写。
+     *
+     * 提供这个入口是为了让上层能把假设变成可测的东西：每帧配对调用一次，
+     * 画面从黑变对，就说明分配器走的是 staging 路径。
+     *
+     * @warning 每帧调用会在热路径上引入 map/unmap，违反 Step 2 的稳态
+     *          ioctl 约束。**它是诊断手段，不是常规用法。**
+     */
+    void end_cpu_write() noexcept;
+
     std::string to_string() const;
 
     bool valid() const noexcept;

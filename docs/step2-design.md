@@ -246,23 +246,29 @@ fb_id 依然有效。所以 `import_as_framebuffer()` 在 addfb2 之后立刻释
 - **承载 3D 的是 renderD130（`pvr`）**，`GL_RENDERER = "Hygon CJ"`，EGL 1.5。
   renderD128（`hygpu`）没有对应的 `*_dri.so`，只能退到 softpipe。
   判定方法已固化成代码：`render::probe_gl_nodes()`。
-- **GL 栈不是 kmsro 在跑。** `vsdrm_dri.so` 确实是 megadriver 的别名，
-  但真正被用上的是 `pvr_dri.so` 对应的硬件驱动，不经过 kmsro 粘合层。
-- **RenderDevice 方向当前不通**：GBM 分配与导出都成功，
-  `drmPrimeFDToHandle` 在 KMS 节点上返回 EINVAL。
+- **GL 栈不是 kmsro 在跑，但也不是原生 PowerVR GL —— 是 zink over Vulkan。**
+  依据是分配时打出的 `MESA: error: ZINK:` 字符串。
+  `GL_RENDERER = "Hygon CJ"` 是 Vulkan 设备名，不是 GL 驱动名。
+  - **RenderDevice 方向通了**（2026-09-03）。中间经历一次 KMD 的 EINVAL 修复，
+    以及一次"每层都成功但扫出全零"的静默失效，后者根因在
+    kcl 兼容垫片，见 `vsdrm-kmd-notes.md`。
 
 ### 仍待确认
 
-1. **`gbm_bo_create_with_modifiers` 的候选列表怎么给。**
-   把目标 plane 的 IN_FORMATS 里该 format 的全部 modifier 原样传给 GBM
-   让它挑。排序是 Step 4 dmabuf-feedback tranche 的事，Step 2 不预先引入策略。
-   —— 已按此实现，但在 RenderDevice 方向打通之前没有被真正压测过。
+1. **`gbm_bo_create_with_modifiers` 的候选列表怎么给。** —— 已定案并实测：
+   把目标 plane 的 IN_FORMATS 里该 format 的全部 modifier 原样传给 GBM。
+   排序是 Step 4 tranche 的事，分配层不预先引入策略。
+   实测这套硬件上 GBM（zink）恒定挑 LINEAR，所以第 2 条的降级分支
+   仍未被覆盖。
 2. **GBM 挑出的 modifier 不在 plane 支持列表里怎么办。**
    理论上不该发生（列表就是我们给的），但驱动可能忽略列表。
    当前：`Framebuffer::add_with_fallback()` 降级 + WARN。
 3. **`DRM_RDWR` 要不要默认开。** 导入方想 mmap 写像素时必需，
    对纯 scanout 是多余权限。当前默认 `ReadOnly`，
    ScanoutDevice 路径与 Step 3 的 CPU client 显式传 `ReadWrite`。
+   —— 实测补充：`--draw gl` 下 `need_cpu_write=false`，但 ScanoutDevice
+   仍无条件 `map_dumb` 并以 `ReadWrite` 导出，多了两个 8MB 映射和多余权限。
+   不是 bug，是 Step 3 该收紧的地方。
 
 ## 七、实现阶段的修正与新增决定（2026-08-30）
 
@@ -580,3 +586,43 @@ Step 1 的勘察里已经发现 vsdrm 有两个私有 modifier 属于这一类�
 而这正是 `linux-dmabuf-feedback` 要避开的东西 ——
 把一个实际不能扫描输出的 modifier 放进 tranche 1，
 客户端会照着分配，然后每一帧都走 GPU 合成回退。
+
+### 7.15 `--verify` 多通道读回自检（2026-09-03）
+
+第一帧画完、上屏之前，从所有可用通道读回同一批采样点横向比对：
+
+| 通道 | 读法 | 回答什么 |
+| --- | --- | --- |
+| `gl` | 绑 FBO + `glReadPixels` | GPU 写了没有 |
+| `cpu` | 分配器给的映射 | 上层看到的内容 |
+| `dmabuf` | 直接 `mmap(dmabuf_fd)` | **这个 fd 背后真正那块内存** |
+
+判据是**通道之间是否一致**，不是任何单个通道的绝对值。这次黑屏期间
+`gl` 和 `cpu` 两列全都显示正确 —— 它们看到的是各自那一侧的视角，
+都在说谎。只有第三列能拆穿，而 pvr 恰好把它掐了。
+
+失败不退出，照常上屏：屏幕上看到的和表格对照才有信息量。
+
+### 7.16 `--unmap-each-frame` 与 `end_cpu_write()`（2026-09-03）
+
+`gbm_bo_map()` 在底层资源不是 host-visible 时可能返回 staging buffer，
+真正的拷回发生在 `gbm_bo_unmap()`。当前实现整跑只在析构时 unmap 一次，
+这隐含了"映射就是 dmabuf 那块内存"的假设。
+
+`end_cpu_write()` 把这个假设变成可测的：每帧配对调用，画面从黑变对
+就说明走的是 staging 路径。**它是诊断手段，每帧调用会违反稳态 ioctl 约束。**
+
+实测结论：这套硬件上不是 staging。
+
+### 验收标准覆盖不到的地方（必须写明）
+
+Step 2 的自动化验收**只覆盖到 dmabuf 内存那一层，不覆盖"画面正确"**。
+
+`--verify` 能证明像素落在了 dmabuf 背后的内存里（前提是导出方允许
+`mmap(dmabuf_fd)`，pvr 不允许，见 `PMR_NOT_PERMITTED`），
+但证明不了显示引擎读到了它。这一段目前只能靠眼睛。
+
+补上它需要 KMS writeback 回读 + CRC 比对。6 个 connector 里有没有
+`DRM_MODE_CONNECTOR_WRITEBACK` 还没查。**这是 Step 3 之前该有个说法的事**——
+Step 3 起客户端 buffer 全部跨进程跨设备，同一类"层层成功、画面全黑"
+会以"某些窗口是黑的"重现，而那时排查面大得多。

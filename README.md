@@ -225,7 +225,7 @@ VKMS 过而 vsdrm 不过 ⇒ 大概率 KMD 问题；反过来 ⇒ 代码有 vend
   - [x] 板上端到端验收：1920x1080@60，269 帧 0 丢帧，稳态每帧仅 1 次 atomic_commit
   - [x] 闸门与端到端结果写回 `docs/step2-probe-results.md`
   - [x] `learning-notes/02-让-GPU-参与进来.md`
-  - [ ] `-s render --draw gl` 端到端跑一次 —— 验收清单见 `docs/step2-render-path-acceptance.md`
+  - [x] `-s render --draw gl` 端到端跑一次
 - [ ] Step 3：DMA-BUF 跨进程 direct scanout
 - [ ] Step 4：最小 wayland server
 - [ ] Step 5：硬件 plane 分配器（TEST_ONLY 试探 + 降级）

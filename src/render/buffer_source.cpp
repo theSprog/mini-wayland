@@ -380,12 +380,21 @@ ScanoutBuffer::ScanoutBuffer(std::unique_ptr<ScanoutBufferImpl> impl) noexcept
     : impl_(std::move(impl)) {}
 
 ScanoutBuffer::~ScanoutBuffer() {
-    if (impl_ && impl_->mapped != nullptr) {
-        // dumb 路径的映射归 DumbBuffer 管，这里只处理 GBM 路径自己建立的。
-        if (impl_->gbm_buffer.valid()) {
-            gbm::unmap(impl_->gbm_buffer, impl_->map_cookie);
-        }
+    end_cpu_write();
+}
+
+void ScanoutBuffer::end_cpu_write() noexcept {
+    if (impl_ == nullptr || impl_->mapped == nullptr) {
+        return;
+    }
+    // dumb 路径的映射归 DumbBuffer 管，它在自己的析构里 munmap，
+    // 而且那块映射就是 dmabuf 背后的内存，没有 unmap 才生效的语义。
+    // 所以这里只处理 GBM 路径自己建立的映射。
+    if (impl_->gbm_buffer.valid()) {
+        gbm::unmap(impl_->gbm_buffer, impl_->map_cookie);
+        impl_->map_cookie = nullptr;
         impl_->mapped = nullptr;
+        impl_->mapped_size = 0;
     }
 }
 

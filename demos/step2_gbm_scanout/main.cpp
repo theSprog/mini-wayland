@@ -48,6 +48,7 @@
  *     这是这一步最容易失守的地方。
  *  4. 退出时 create/destroy 配平
  */
+#include <cerrno>
 #include <csignal>
 #include <cmath>
 #include <cstdio>
@@ -56,8 +57,20 @@
 #include <string>
 #include <vector>
 
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+
 #include <drm_fourcc.h>
 #include <GLES2/gl2.h>
+
+// dma-buf 的 CPU 访问同步 ioctl。4.6 起就在，但把它做成可选依赖 ——
+// 缺了只是少一次 cache 维护，不该让整个 demo 编不过。
+#if defined(__has_include)
+#  if __has_include(<linux/dma-buf.h>)
+#    include <linux/dma-buf.h>
+#    define MW_HAVE_DMA_BUF_SYNC 1
+#  endif
+#endif
 
 #include "mw/core/log.hpp"
 #include "mw/drm/atomic.hpp"
@@ -108,6 +121,8 @@ struct Options {
     std::vector<std::string> skip_nodes{};
     bool no_modifiers = false;
     bool dry_run = false;
+    bool verify = false;
+    bool unmap_each_frame = false;
 };
 
 void print_usage(const char* argv0) {
@@ -122,6 +137,11 @@ void print_usage(const char* argv0) {
     std::printf("  -f <n>          stop after n frames\n");
     std::printf("  -b <n>          number of buffers, 2 or 3 (default 2)\n");
     std::printf("  --no-modifiers  ignore IN_FORMATS, as if the driver had none\n");
+    std::printf("  --verify        read the first frame back through every available\n");
+    std::printf("                  channel and compare them before going on screen\n");
+    std::printf("  --unmap-each-frame  diagnostic: unmap the CPU mapping after every\n");
+    std::printf("                  frame. Costs map/unmap per frame, so it violates the\n");
+    std::printf("                  steady-state ioctl budget on purpose\n");
     std::printf("  --dry-run       stop after the modeset TEST_ONLY\n");
     std::printf("  -h              this help\n");
     std::printf("\nthis program needs DRM master:\n");
@@ -142,13 +162,20 @@ void print_usage(const char* argv0) {
  * 性能：这类内存通常是 write-combining，顺序宽写快、读回极慢。
  * 所以先在普通内存里拼好一整行再整行 memcpy —— 只有一次顺序写穿过它。
  */
-void draw_cpu(span<uint8_t> pixels, Size size, uint32_t stride, uint64_t frame) {
-    static const uint32_t kBars[] = {
-        0x00ffffffu, 0x00ffff00u, 0x0000ffffu, 0x0000ff00u,
-        0x00ff00ffu, 0x00ff0000u, 0x000000ffu, 0x00000000u,
-    };
-    constexpr uint32_t kBarCount = sizeof(kBars) / sizeof(kBars[0]);
+/**
+ * @brief 竖彩条的调色板
+ *
+ * 提到文件作用域是因为 `--verify` 要在不重画一遍的前提下算出
+ * 某个坐标**应该**是什么颜色。两处用同一份常量，改了颜色不会
+ * 让自检悄悄失去意义。
+ */
+const uint32_t kBars[] = {
+    0x00ffffffu, 0x00ffff00u, 0x0000ffffu, 0x0000ff00u,
+    0x00ff00ffu, 0x00ff0000u, 0x000000ffu, 0x00000000u,
+};
+constexpr uint32_t kBarCount = sizeof(kBars) / sizeof(kBars[0]);
 
+void draw_cpu(span<uint8_t> pixels, Size size, uint32_t stride, uint64_t frame) {
     static std::vector<uint32_t> normal_row;
     static std::vector<uint32_t> band_row;
     normal_row.resize(size.width);
@@ -186,6 +213,289 @@ void draw_cpu(span<uint8_t> pixels, Size size, uint32_t stride, uint64_t frame) 
         const uint32_t* source = in_band ? band_row.data() : normal_row.data();
         std::memcpy(pixels.data() + offset, source, row_bytes);
     }
+}
+
+// ---------------------------------------------------------------------------
+// 读回自检
+// ---------------------------------------------------------------------------
+
+/*
+ * ## 为什么需要这个
+ *
+ * 这条链路上的每一层都只校验元数据：
+ *
+ *   PRIME_FD_TO_HANDLE  只说明内核建出了 GEM object
+ *   addfb2              只校验 format/stride/size 自洽
+ *   TEST_ONLY           只校验 plane 约束（缩放、带宽、格式组合）
+ *   page flip event     只说明 CRTC 翻页了
+ *
+ * **没有任何一层校验"像素真的在那块内存里、而且显示引擎读得到"。**
+ * 所以整条链路可以全绿而屏幕是黑的 —— 这个失败模式已经在
+ * RenderDevice 路径上出现过一次。
+ *
+ * 这里做的事：把第一帧从**所有能用的通道**读回来，横向比对。
+ * 通道之间不一致，比任何单个通道的绝对值都更有信息量：
+ *
+ *   GL 有内容 + dmabuf mmap 全零   -> GPU 没写进这块 dmabuf 的内存
+ *   CPU 映射有内容 + mmap 全零     -> gbm_bo_map 给的是 staging buffer，
+ *                                     真正的拷回发生在 gbm_bo_unmap
+ *   两个通道都有内容 + 屏幕是黑的  -> 内存是对的，显示引擎读不到，
+ *                                     问题在 KMD 的地址/映射
+ *   mmap 直接失败                  -> 导出方没实现 dma-buf mmap，
+ *                                     这本身是一条要记进 docs 的能力结论
+ *
+ * 这不是一次性的排障脚本。Step 3 起 buffer 全部来自别的进程和别的设备，
+ * 同一类"层层成功、画面全黑"会反复出现，得有个机器可判的手段。
+ */
+
+/// 一个采样点在各通道上的读数。has_* 为 false 表示该通道本次不可用。
+struct SamplePoint {
+    uint32_t x = 0;
+    uint32_t y = 0;
+
+    uint32_t expected = 0;
+    bool has_expected = false;
+
+    uint32_t cpu = 0;
+    bool has_cpu = false;
+
+    uint32_t dmabuf = 0;
+    bool has_dmabuf = false;
+
+    uint32_t gl = 0;
+    bool has_gl = false;
+};
+
+/// 采样点：每根彩条的中心，取一行不会落在滚动横带里的 y。
+std::vector<SamplePoint> make_sample_points(Size size) {
+    std::vector<SamplePoint> points;
+    const uint32_t bar_width = size.width / kBarCount;
+    if (bar_width == 0) {
+        return points;
+    }
+    // frame 0 的横带在 y=[0,6)，游标在 x=[0,8)，取中间的行与条心都避开。
+    const uint32_t y = size.height / 2;
+    for (uint32_t bar = 0; bar < kBarCount; ++bar) {
+        SamplePoint point;
+        point.x = bar * bar_width + bar_width / 2;
+        point.y = y;
+        point.expected = kBars[bar];
+        points.push_back(point);
+    }
+    return points;
+}
+
+/// XR24 在内存里是小端的 0x00RRGGBB，高 8 位是 X，比较时一律抹掉。
+uint32_t load_xrgb(const uint8_t* base, size_t stride, uint32_t x, uint32_t y) {
+    uint32_t value = 0;
+    std::memcpy(&value, base + (static_cast<size_t>(y) * stride) + (static_cast<size_t>(x) * 4u),
+                sizeof(value));
+    return value & 0x00ffffffu;
+}
+
+#if defined(MW_HAVE_DMA_BUF_SYNC)
+void sync_dma_buf(int fd, uint64_t flags) {
+    struct dma_buf_sync sync{};
+    sync.flags = flags;
+    if (ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync) != 0) {
+        // 不是所有导出方都实现了它。失败只影响 cache 一致性，
+        // 而且失败本身也是一条能力观察，所以只降级成 DEBUG。
+        LOG_DEBUG("DMA_BUF_IOCTL_SYNC(flags={}) failed: {}", flags, errno_name(errno));
+    }
+}
+#endif
+
+/**
+ * @brief 直接 mmap dmabuf fd 读回
+ *
+ * 这是**绕过分配器的那条通道**：不经过 gbm_bo_map，也不经过 GL，
+ * 看到的是这个 fd 背后真正的那块内存。
+ */
+void sample_via_dmabuf(const render::ScanoutBuffer& buffer, std::vector<SamplePoint>& points) {
+    const drm::DmabufDesc& desc = buffer.dmabuf();
+    if (desc.num_planes != 1) {
+        LOG_WARN("  dmabuf readback skipped: {} planes, this check only handles single-plane",
+                 desc.num_planes);
+        return;
+    }
+    const int fd = desc.fds[0].get();
+    if (fd < 0) {
+        return;
+    }
+
+    const size_t stride = buffer.stride();
+    const size_t length =
+        static_cast<size_t>(desc.offsets[0]) + (stride * static_cast<size_t>(buffer.size().height));
+
+    void* mapped = mmap(nullptr, length, PROT_READ, MAP_SHARED, fd, 0);
+    if (mapped == MAP_FAILED) {
+        LOG_WARN("  dmabuf readback unavailable: mmap on the dmabuf fd failed with {}",
+                 errno_name(errno));
+        LOG_WARN("  that means the exporter does not implement dma-buf mmap; record it in docs "
+                 "and fall back to comparing the CPU and GL channels only");
+        return;
+    }
+
+#if defined(MW_HAVE_DMA_BUF_SYNC)
+    sync_dma_buf(fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
+#endif
+
+    const auto* base = static_cast<const uint8_t*>(mapped) + desc.offsets[0];
+    for (SamplePoint& point : points) {
+        point.dmabuf = load_xrgb(base, stride, point.x, point.y);
+        point.has_dmabuf = true;
+    }
+
+#if defined(MW_HAVE_DMA_BUF_SYNC)
+    sync_dma_buf(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
+#endif
+
+    munmap(mapped, length);
+}
+
+/// 通过分配器给的 CPU 映射读回（dumb 是 mmap，GBM 是 gbm_bo_map）。
+void sample_via_cpu_map(render::ScanoutBuffer& buffer, std::vector<SamplePoint>& points) {
+    if (! buffer.cpu_writable()) {
+        return;
+    }
+    auto pixels = buffer.map_write();
+    if (! pixels) {
+        LOG_WARN("  cpu readback unavailable: {}", pixels.error().message);
+        return;
+    }
+    // 写合并内存读回极慢，所以只读这几个点，不要在这里遍历整帧。
+    const size_t stride = buffer.stride();
+    for (SamplePoint& point : points) {
+        const size_t offset = (static_cast<size_t>(point.y) * stride) +
+                              (static_cast<size_t>(point.x) * 4u);
+        if (offset + 4u > pixels.value().size()) {
+            continue;
+        }
+        point.cpu = load_xrgb(pixels.value().data(), stride, point.x, point.y);
+        point.has_cpu = true;
+    }
+}
+
+/**
+ * @brief 从 GL 的 FBO 读回
+ *
+ * @note GL 的原点在左下，buffer 的第 0 行在顶部，所以 y 要翻转。
+ *       GLES 只保证 GL_RGBA/GL_UNSIGNED_BYTE 这一组合可读。
+ */
+void sample_via_gl(const render::Swapchain::Slot& slot, std::vector<SamplePoint>& points) {
+    if (! slot.has_target()) {
+        return;
+    }
+    if (auto status = slot.target.bind(); ! status) {
+        LOG_WARN("  gl readback unavailable: {}", status.error().message);
+        return;
+    }
+    const uint32_t height = slot.buffer.size().height;
+    for (SamplePoint& point : points) {
+        uint8_t rgba[4] = {0, 0, 0, 0};
+        const auto gl_y = static_cast<GLint>(height - 1u - point.y);
+        glReadPixels(static_cast<GLint>(point.x), gl_y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        if (glGetError() != GL_NO_ERROR) {
+            LOG_WARN("  gl readback failed at ({}, {})", point.x, point.y);
+            break;
+        }
+        point.gl = (static_cast<uint32_t>(rgba[0]) << 16) |
+                   (static_cast<uint32_t>(rgba[1]) << 8) | static_cast<uint32_t>(rgba[2]);
+        point.has_gl = true;
+    }
+    render::GlRenderTarget::unbind();
+}
+
+/// 固定 8 字符宽，缺席的通道用横线占位，这样表格列是对齐的。
+/// 内部 fmt 的语法是 [[fill]align][width][type]，**没有 '#' 前缀形式**，
+/// 所以 "0x" 得自己拼。
+std::string format_channel(bool has, uint32_t value) {
+    return has ? ("0x" + fmt("{:06x}", value)) : std::string("--------");
+}
+
+/**
+ * @brief 第一帧画完之后、上屏之前跑一次
+ *
+ * @return 全部可用通道一致时为 true。**返回 false 不终止 demo** ——
+ *         把画面留在屏幕上，用眼睛和这份表格对照，比直接退出有用。
+ */
+bool verify_first_frame(render::Swapchain::Slot& slot, bool cpu_drawn) {
+    LOG_INFO("--verify: reading the first frame back through every available channel");
+    LOG_SCOPE();
+
+    std::vector<SamplePoint> points = make_sample_points(slot.buffer.size());
+    if (points.empty()) {
+        LOG_WARN("the buffer is too narrow to sample; skipping");
+        return true;
+    }
+    if (! cpu_drawn) {
+        // GL 画的内容不是彩条，没有可预测的期望值。这时候自检的判据
+        // 只有"各通道是否互相一致"，而那恰恰是分辨 A/B 需要的东西。
+        for (SamplePoint& point : points) {
+            point.has_expected = false;
+        }
+    } else {
+        for (SamplePoint& point : points) {
+            point.has_expected = true;
+        }
+    }
+
+    sample_via_gl(slot, points);
+    sample_via_cpu_map(slot.buffer, points);
+    sample_via_dmabuf(slot.buffer, points);
+
+    LOG_INFO("      x     y expected       gl      cpu   dmabuf");
+    bool all_zero_dmabuf = true;
+    bool any_dmabuf = false;
+    bool mismatch = false;
+
+    for (const SamplePoint& point : points) {
+        LOG_INFO("  {:>5} {:>5} {} {} {} {}", point.x, point.y,
+                 format_channel(point.has_expected, point.expected),
+                 format_channel(point.has_gl, point.gl),
+                 format_channel(point.has_cpu, point.cpu),
+                 format_channel(point.has_dmabuf, point.dmabuf));
+
+        if (point.has_dmabuf) {
+            any_dmabuf = true;
+            if (point.dmabuf != 0) {
+                all_zero_dmabuf = false;
+            }
+        }
+        if (point.has_expected && point.has_cpu && point.cpu != point.expected) {
+            mismatch = true;
+        }
+        if (point.has_expected && point.has_dmabuf && point.dmabuf != point.expected) {
+            mismatch = true;
+        }
+        if (point.has_cpu && point.has_dmabuf && point.cpu != point.dmabuf) {
+            mismatch = true;
+        }
+    }
+
+    if (any_dmabuf && all_zero_dmabuf) {
+        LOG_ERROR("every sample read back as zero through the dmabuf fd: the pixels never "
+                  "reached the memory this fd refers to");
+        LOG_ERROR("if the cpu column has content, the allocator handed out a staging buffer "
+                  "and the copy back only happens on unmap");
+        LOG_ERROR("if the gl column has content, the GPU wrote somewhere else than this dmabuf");
+        return false;
+    }
+    if (mismatch) {
+        LOG_ERROR("the channels disagree; the columns above say which pair");
+        return false;
+    }
+
+    LOG_INFO("every available channel agrees");
+    if (! any_dmabuf) {
+        LOG_WARN("the dmabuf channel was unavailable, so this only proves the allocator's own "
+                 "mapping is consistent -- it says nothing about what the display engine reads");
+    } else {
+        LOG_INFO("the pixels are in the memory this dmabuf fd refers to; if the screen is still "
+                 "blank, the display engine cannot reach that memory and the problem is below "
+                 "this program");
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -445,6 +755,12 @@ Status draw_into(const FrameContext& ctx, render::Swapchain::Slot& slot, uint64_
             return unexpected<Error>(pixels.error());
         }
         draw_cpu(pixels.value(), slot.buffer.size(), slot.buffer.stride(), frame);
+        if (ctx.options.unmap_each_frame) {
+            // 见 ScanoutBuffer::end_cpu_write()。这里放的是一个假设的开关，
+            // 不是一个优化：如果 unmap 之后画面才对，那说明上面那次写落在了
+            // staging buffer 里，而不是 dmabuf 背后的内存。
+            slot.buffer.end_cpu_write();
+        }
         return Ok();
     }
 
@@ -781,6 +1097,14 @@ int run(const Options& options) {
         return 1;
     }
 
+    // 自检放在 modeset 之前：这一帧的像素已经画完，但还没有任何东西
+    // 依赖它上屏。此时通道之间的分歧是纯粹的 buffer 问题，和 KMS 无关。
+    // 失败不退出 —— 让画面照常上屏，屏幕上看到的和表格对照才有意义。
+    if (options.verify && ! verify_first_frame(chain.acquire(), options.draw == DrawKind::Cpu)) {
+        LOG_WARN("--verify failed; going on screen anyway so the picture can be compared "
+                 "against the table above");
+    }
+
     if (auto status = do_modeset(device, path, request, mode_blob, chain.acquire().buffer.fb_id());
         ! status) {
         log_error_object(status.error(), "modeset");
@@ -856,6 +1180,14 @@ int main(int argc, char** argv) {
         }
         if (std::strcmp(arg, "--no-modifiers") == 0) {
             options.no_modifiers = true;
+            continue;
+        }
+        if (std::strcmp(arg, "--verify") == 0) {
+            options.verify = true;
+            continue;
+        }
+        if (std::strcmp(arg, "--unmap-each-frame") == 0) {
+            options.unmap_each_frame = true;
             continue;
         }
         if (std::strcmp(arg, "-d") == 0 && i + 1 < argc) {

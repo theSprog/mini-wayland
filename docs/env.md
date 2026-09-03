@@ -89,6 +89,14 @@ drm_file。跨节点用 buffer 只能走 PRIME。
 映射到了硬件驱动，换个构建、换块板子就没了。默认仍然按"分配设备与渲染设备
 可能不同"来写，`probe_gl_nodes()` 每次实测决定用哪个。
 
+
+- pvr（card3 / renderD130）：`CREATE_DUMB` → **ENOSYS**，无 dumb buffer 支持
+- pvr 导出的 dmabuf：**不可 CPU mmap**（`PVRSRV_ERROR_PMR_NOT_PERMITTED`），
+  且 sg_table 无 `struct page`
+- 任何 render node 上 `CREATE_DUMB` → **EACCES**（`DRM_RENDER_ALLOW` 检查），
+  与驱动无关
+
+  
 ## 三、card2 (vsdrm) KMS 资源
 
 以下由 `probe_kms` 实测得出。
