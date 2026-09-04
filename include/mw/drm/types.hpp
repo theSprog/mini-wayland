@@ -185,6 +185,46 @@ enum class PlaneType {
 enum class Format : uint32_t {};
 
 /**
+ * @brief 四个字符拼成一个 fourcc
+ *
+ * 等价于 libdrm 的 `fourcc_code()`，自己写一遍有两个理由：
+ * 一是这个头文件因此不必 include `<drm_fourcc.h>`（那个宏体是 C 风格强转，
+ * 只能靠 `-isystem` 压住告警，不该出现在最基础的类型头里）；
+ * 二是把"fourcc 就是四个 ASCII 字符按小端拼出来的 32 位数"这件事写在代码里，
+ * 比记住一串十六进制常量有用。
+ */
+constexpr Format fourcc(char a, char b, char c, char d) noexcept {
+    return Format{static_cast<uint32_t>(static_cast<unsigned char>(a)) |
+                  (static_cast<uint32_t>(static_cast<unsigned char>(b)) << 8) |
+                  (static_cast<uint32_t>(static_cast<unsigned char>(c)) << 16) |
+                  (static_cast<uint32_t>(static_cast<unsigned char>(d)) << 24)};
+}
+
+// 只列工程当前真正用到的几个。**不要**在这里堆一张完整格式表 ——
+// 那张表属于将来某个真的需要遍历格式的模块，不属于类型定义。
+inline constexpr Format kFormatXrgb8888 = fourcc('X', 'R', '2', '4');
+inline constexpr Format kFormatArgb8888 = fourcc('A', 'R', '2', '4');
+inline constexpr Format kFormatXbgr8888 = fourcc('X', 'B', '2', '4');
+inline constexpr Format kFormatAbgr8888 = fourcc('A', 'B', '2', '4');
+inline constexpr Format kFormatRgb565 = fourcc('R', 'G', '1', '6');
+
+/**
+ * @brief 单像素字节数，**仅对单平面 packed 格式有意义**
+ *
+ * 认识的格式返回 4 / 2 之类，不认识的返回 0。返回 0 不代表格式非法，
+ * 只代表"这个 API 表达不了它"——多平面格式（NV12 等）的每个平面
+ * 各有各的 bpp 与 stride，一个标量回答不了。
+ *
+ * 存在的理由：CPU 往 buffer 里写像素时必须知道一个像素几个字节。
+ * 没有这个函数，每个调用方都会自己写一句 `stride / width` 或者写死 4，
+ * 前者在有 padding 的 stride 上是错的，后者在换格式时是错的。
+ *
+ * @warning 定位像素**只能用 buffer 自己报的 stride**，
+ *          绝不能用 `width * bytes_per_pixel()` —— 两者常常不相等。
+ */
+uint32_t bytes_per_pixel(Format format) noexcept;
+
+/**
  * @brief DRM format modifier。**不透明**。
  *
  * 禁止在主逻辑里出现任何形如 `(mod >> 56) == 0x0b` 的 vendor 判断。

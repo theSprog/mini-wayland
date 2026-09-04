@@ -23,11 +23,11 @@
 #include <string>
 #include <string_view>
 
-#include "internal/error.hpp"
-#include "internal/expected.hpp"
-#include "internal/format.hpp"
-#include "internal/macro.hpp"
-#include "internal/span.hpp"
+#include "mw/internal/error.hpp"
+#include "mw/internal/expected.hpp"
+#include "mw/internal/format.hpp"
+#include "mw/internal/macro.hpp"
+#include "mw/internal/span.hpp"
 
 namespace mw {
 

@@ -20,7 +20,7 @@ using func_sig_t = void (*)(int);
 using func_void_t = void (*)();
 
 struct handler {
-    enum class kind { none, func_sig, func_void, ignore, default_action } type{kind::none};
+    enum class kind { none, func_sig, func_void, ignore_signal, use_default } type{kind::none};
     union {
         func_sig_t  fn_sig;
         func_void_t fn_void;
@@ -30,7 +30,8 @@ struct handler {
     constexpr handler(func_sig_t fn) noexcept : type(kind::func_sig), fn_sig(fn) {}
     constexpr handler(func_void_t fn) noexcept : type(kind::func_void), fn_void(fn) {}
     constexpr handler(special_action act) noexcept
-        : type(act.value == special_action::ignore ? kind::ignore : kind::default_action), fn_sig(nullptr) {}
+        : type(act.value == special_action::ignore ? kind::ignore_signal : kind::use_default),
+          fn_sig(nullptr) {}
 };
 
 struct rule {
@@ -58,7 +59,7 @@ inline void dispatcher(int signo) noexcept {
 
 class guard {
 public:
-    guard() noexcept = default;
+    guard() noexcept : entries_() {}
     ~guard() { restore(); }
 
     guard(const guard&) = delete;
@@ -78,10 +79,10 @@ public:
     }
 
     void restore() noexcept {
-        for (const auto& entry : entries_) {
-            ::sigaction(entry.signo, &entry.old_sa, nullptr);
-            if (entry.signo >= 0 && entry.signo < max_signals) {
-                g_handlers[entry.signo] = entry.old_handler;
+        for (const auto& saved : entries_) {
+            ::sigaction(saved.signo, &saved.old_sa, nullptr);
+            if (saved.signo >= 0 && saved.signo < max_signals) {
+                g_handlers[saved.signo] = saved.old_handler;
             }
         }
         entries_.clear();
@@ -115,9 +116,9 @@ private:
         struct sigaction new_sa{};
         struct sigaction old_sa{};
 
-        if (r.h.type == handler::kind::ignore) {
+        if (r.h.type == handler::kind::ignore_signal) {
             new_sa.sa_handler = SIG_IGN;
-        } else if (r.h.type == handler::kind::default_action) {
+        } else if (r.h.type == handler::kind::use_default) {
             new_sa.sa_handler = SIG_DFL;
         } else {
             new_sa.sa_handler = &dispatcher;

@@ -16,6 +16,9 @@ make check-headers        # 每个 .hpp 单独编译
 make check                # check-headers + cppcheck + clang-tidy
 make compile_commands.json
 make V=1
+
+make install PREFIX=$HOME/.local   # 头文件 + libmini-wayland.a + pkg-config
+make uninstall PREFIX=$HOME/.local
 ```
 
 依赖：`libdrm-dev`、`libgbm-dev`、`libegl-dev`、`libgles2-mesa-dev`。
@@ -51,6 +54,11 @@ sudo /tmp/mini && dmesg | tail -50   # writeback 提交后引擎不停：释放 
 
 ./build/debug/bin/smoke_ipc        # mw/ipc 自检：线格式 / SCM_RIGHTS / 签名，不碰硬件
 
+# mw/display 门面的最小用法。默认 offscreen 后端，不碰 DRM、不需要权限。
+./build/debug/bin/hello_screen -f 120
+./build/debug/bin/hello_screen -f 3 -o /tmp/out    # 每帧落一张 PPM
+./build/debug/bin/hello_screen --help              # parse_args 生成的用法
+
 ./build/debug/bin/step2_prime_roundtrip            # PRIME 导出/导入正确性
 ./build/debug/bin/step2_prime_roundtrip -s 1920x1080   # 用真实分辨率压 stride 对齐
 ./build/debug/bin/step2_prime_roundtrip -p /dev/dri/cardN  # 指定跨设备用例的对端
@@ -74,6 +82,8 @@ sudo ./build/debug/bin/step2_gbm_scanout -g /dev/dri/card2  # 指定 GBM/EGL 用
 # writeback connector 可用性探针（回答 docs/open-questions.md Q-1~Q-4）
 sudo ./build/debug/bin/probe_writeback                 # 只枚举 + TEST_ONLY，安全
 sudo ./build/debug/bin/probe_writeback --commit        # 真提交并回读，可能卡 10s
+
+sudo ./build/debug/bin/hello_screen -b kms -f 600   # 门面走真 KMS
 
 # Step 3：client 进程分配并绘制，server 导入上屏
 sudo ./build/debug/bin/step3_dmabuf_ipc --spawn -f 600      # 一条命令跑完整条链路
@@ -103,7 +113,8 @@ modeset / 帧循环 / 记账是同一份代码。先跑通 cpu 再切 gl —— 
 ```
 include/mw/core/     UniqueFd、Error、日志 —— 不含任何 DRM 概念
 include/mw/drm/      KMS 抽象层
-include/internal/    基础工具头（expected / Error / fmt / panic / span / stacktrace）
+include/mw/display/  门面：给**库外消费者**用的 Screen / Frame（见 docs/api.md）
+include/mw/internal/ 基础工具头（expected / Error / fmt / panic / span / stacktrace）
 src/                 实现，与 include/mw 一一对应
 demos/<name>/        每个子目录一个可执行文件，加目录即被构建，不用改 Makefile
 scripts/             环境勘察脚本
@@ -119,7 +130,9 @@ docs/                见下
 | `docs/stepN-design.md` | 该 step 的**最终**设计与取舍 | 收尾时重写 |
 | `docs/lessons.md` | 跨 step 的方法论教训 | 只增 |
 | `docs/vendor-kmd-notes.md` | 厂商 KMD 读码结论（推论，非实测） | 驱动更新时改 |
-| `docs/internal-lib.md` | `include/internal/` 的本地改动与使用约定 | — |
+| `docs/internal-lib.md` | `include/mw/internal/` 的本地改动与使用约定 | — |
+| `docs/api.md` | 导出边界、稳定性分级、消费方式 | 接口变动时改 |
+| `docs/handoff-mini-render.md` | 给 mini-render 的交接 | — |
 | `learning-notes/NN-*.md` | 该 step 的技术长文（给别人看，见下） | 发布后不动 |
 
 三条规则见 `docs/README.md`：一个事实只有一个家；step 设计文档收尾时重写而不是追加；
@@ -135,6 +148,7 @@ docs/                见下
 | `mw/egl` | `<EGL/*>` + `mw/gbm` | dmabuf ↔ EGLImage |
 | `mw/render` | `<GLES*/*>` + 以上全部 | 归一成 `ScanoutBuffer` |
 | `mw/ipc` | 标准库 + `mw/core` + `mw/drm` 的强类型 | **不得**包含 libdrm / EGL / GL / GBM；判据是能在没有 GPU 的机器上编译并单测 |
+| `mw/display` | `mw/drm` + `mw/render` | 门面。**不含** EGL / GL / GBM |
 | 再往上 | **不得**包含 `xf86drm*.h` / EGL / GL / GBM | 只能用 `mw/render` 暴露的类型 |
 
 `mw/render` 之上看不见 EGL / GL / GBM。Step 5 的 plane 分配器只该看见
@@ -265,6 +279,11 @@ VKMS 过而 vsdrm 不过 ⇒ 大概率 KMD 问题；反过来 ⇒ 代码有 vend
   - [x] `demos/probe_writeback`：Q-1~Q-4 全部答完，writeback 可作 Step 5 的显示侧判据
   - [x] `learning-notes/03-让另一个进程来画.md`
   - [x] `demos/probe_writeback`：Q-1~Q-4 全部答完，writeback 可作 Step 5 的显示侧判据
+- [x] 导出（Step 3 收尾之后追加）：`mw/display` 门面、`make install` +
+      pkg-config、稳定性分级。见 `docs/api.md` 与 `docs/handoff-mini-render.md`
+  - [ ] `hello_screen -b kms` 尚未在真硬件上跑过
+  - [x] `mw/internal/` 的 4 个工具头修到告警干净并纳入 `check-headers`；
+        `hello_screen` 改用 `parse_args` / `sig::guard` 作为范例
 - [ ] Step 4：最小 wayland server
 - [ ] Step 5：硬件 plane 分配器（TEST_ONLY 试探 + 降级）
 - [ ] Step 6：DRM syncobj 显式同步

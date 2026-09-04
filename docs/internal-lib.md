@@ -1,4 +1,4 @@
-# include/internal/ —— 基础工具头
+# include/mw/internal/ —— 基础工具头
 
 来自另一个项目的头文件库（expected / Error / fmt / panic / span / stacktrace），
 全部 header-only，不需要编译。这里记录本项目对它做的改动和使用它时要知道的坑。
@@ -12,12 +12,40 @@
 | 3 | `stacktrace.hpp` | `Module` 构造函数参数加 `_` 后缀 | 修 4 处 `-Wshadow`。原来的 `: path(path), base(base)` 虽然合法，但正是 `-Wshadow` 该拦的那种写法 |
 | 4 | `stacktrace.hpp` | `st.st_size` / `backtrace()` 返回值显式转 `size_t` | 修 5 处 `-Wsign-conversion` |
 | 5 | `format.hpp` | `parse_spec()` 支持 `[[fill]align][width][type]` | 原来只认 `:x/:X/:b/:d`，`{:>26}` 会被静默忽略。dump 输出是表格状的，没对齐没法和 modetest 逐列比对 |
+| 6 | `signal.hpp` | `kind::ignore` / `kind::default_action` 改名为 `ignore_signal` / `use_default` | 它们和同名的 `constexpr special_action ignore` / `default_action` 撞了 3 处 `-Wshadow` |
+| 7 | `signal.hpp` | `restore()` 的循环变量 `entry` 改名 `saved` | `-Wshadow`：撞上成员类型 `struct entry` |
+| 8 | `signal.hpp` | `guard()` 显式初始化 `entries_()` | `-Weffc++` |
+| 9 | `env.hpp` | 补文件末尾换行 | 最后一行是 `\` 结尾且无换行，GCC 报 `backslash-newline at end of file` |
 
 改动 5 之后 `fmt()` 支持：`{:>26}` 右对齐、`{:<8}` 左对齐、`{:^9}` 居中、
 `{:*^9}` 指定填充字符、`{:016x}` 零填充十六进制。只给宽度不给对齐时默认左对齐。
 
 改动 2 引入了一条使用约定：**`TRY(expr)` 会移动走成功值**，
 所以 `expr` 应该是临时量或你不再需要的变量，不要写 `TRY(还要继续用的变量)`。
+
+## 为什么 parse_args / signal / env / color 一直没人用
+
+不是忘了。**是它们编译不过。**
+
+这四个头文件是后来加进来的，而 `check-headers` 当时的 glob 把整个
+`internal/` 排除在外，所以它们从来没在本工程的告警集合下编译过。
+实测结果是 `signal.hpp` 有 4 处、`env.hpp` 有 1 处会被 `-Werror` 打中
+（改动 6~9）。
+
+于是每一次"用一下现成的"都是这个过程：include 进来 → 撞一堵
+`-Werror` 的墙 → 那是既有库不好改 → 退回去手写 `sigaction` 和
+argv 循环。人和 AI 都会做同样的选择，而且都不会留下记录，
+所以问题看起来像"纪律问题"，其实是构建配置问题。
+
+现在两条都修了：
+
+1. 改动 6~9 让四个头文件在完整告警集合下干净通过
+2. `check-headers` 不再排除 `mw/internal/`（Makefile 里有注释说明）
+
+**光修这个还不够。** 让"用现成的"比"手写"更省事，才是它们真正被用起来
+的条件 —— 见 mini-render 的 `mr/lesson.hpp` 与 `make lint`：那边把这四个
+头文件包进了统一的 harness，并且用 grep 规则禁止在算法代码里出现
+`sigaction` / `getenv` / `argv` / 裸 ANSI 转义。
 
 ## 使用时要知道的坑
 

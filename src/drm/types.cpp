@@ -156,4 +156,17 @@ std::string to_string(const FormatModifier& fm) {
     return to_string(fm.format) + "/" + to_string(fm.modifier);
 }
 
+uint32_t bytes_per_pixel(Format format) noexcept {
+    // 刻意只列已知在用的。加新格式时**顺手确认它确实是单平面 packed**，
+    // 否则这个函数会给出一个看起来合理、实际会算错地址的答案。
+    if (format == kFormatXrgb8888 || format == kFormatArgb8888 ||
+        format == kFormatXbgr8888 || format == kFormatAbgr8888) {
+        return 4u;
+    }
+    if (format == kFormatRgb565) {
+        return 2u;
+    }
+    return 0u;
+}
+
 } // namespace mw::drm

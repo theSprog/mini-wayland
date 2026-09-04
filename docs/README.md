@@ -18,7 +18,7 @@
 | `stepN-design.md` | 该 step 的**最终**设计与取舍 | step 收尾时**重写成终稿**，不是过程日志 |
 | `lessons.md` | 跨 step 的方法论教训 | 只增。与具体 step 解耦 |
 | `vendor-kmd-notes.md` | 厂商 KMD 读码结论 | 驱动更新时改 |
-| `internal-lib.md` | `include/internal/` 的本地改动 | 改动时改 |
+| `internal-lib.md` | `include/mw/internal/` 的本地改动 | 改动时改 |
 | `../learning-notes/NN-*.md` | 对外技术长文 | 发布后基本不动 |
 
 ## 二、三条规则

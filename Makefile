@@ -20,6 +20,22 @@ BUILD      ?= debug
 V          ?= 0
 SANITIZE   ?= 0
 EXCEPTIONS ?= 0
+SHARED     ?= 0
+
+# 安装前缀。DESTDIR 供打包用（`make install DESTDIR=/tmp/stage`）。
+PREFIX     ?= /usr/local
+DESTDIR    ?=
+INCLUDEDIR ?= $(PREFIX)/include
+LIBDIR     ?= $(PREFIX)/lib
+PCDIR      ?= $(LIBDIR)/pkgconfig
+
+# 版本号必须和 include/mw/version.hpp 一致 —— 不一致时 `make install`
+# 会直接失败（见 check-version），不是打个警告了事。
+# 它决定 .so 的 soname 与 .pc 的 Version 字段，错了要到消费者那边才发作。
+VER_MAJOR  := 0
+VER_MINOR  := 3
+VER_PATCH  := 0
+VERSION    := $(VER_MAJOR).$(VER_MINOR).$(VER_PATCH)
 
 # 构建变体各自独立的输出目录。
 # 否则 `make SANITIZE=1` 之后再 `make` 会把插桩过的 .o 和没插桩的混在一起链接，
@@ -131,8 +147,13 @@ LIB_SRCS   := $(wildcard src/*/*.cpp) $(wildcard src/*.cpp)
 LIB_OBJS   := $(LIB_SRCS:%.cpp=$(O)/%.o)
 LIB        := $(O)/lib$(PROJECT).a
 
-# check-headers 只查我们自己写的，不查 include/internal（那是既有库）
-HEADERS    := $(wildcard include/mw/*/*.hpp) $(wildcard include/mw/*.hpp)
+# check-headers 只查我们自己写的，不查 mw/internal/（那是既有库，见 docs/internal-lib.md）
+PUBLIC_HEADERS := $(wildcard include/mw/*.hpp) $(wildcard include/mw/*/*.hpp)
+# mw/internal/ 以前被排除在 check-headers 之外，代价是那里面四个头文件
+# 从来没在本工程的告警集合下编译过 —— 于是谁想用它们，谁就先撞一堵
+# -Werror 的墙，然后退回去手写 argv 循环和 sigaction。这就是它们一直
+# 没人用的真正原因，不是"忘了"。现在全部纳入检查。
+HEADERS        := $(PUBLIC_HEADERS)
 
 DEMO_DIRS  := $(sort $(dir $(wildcard demos/*/)))
 DEMO_NAMES := $(patsubst demos/%/,%,$(DEMO_DIRS))
@@ -151,7 +172,8 @@ endif
 
 # ---------------------------------------------------------------------------
 
-.PHONY: all lib demos clean distclean check check-headers check-deps tidy cppcheck help
+.PHONY: all lib demos shared clean distclean check check-headers check-deps check-version \
+        tidy cppcheck install uninstall help FORCE
 
 all: check-deps lib demos
 
@@ -225,7 +247,7 @@ cppcheck:
 	$(CPPCHECK) --enable=warning,performance,portability \
 		--inline-suppr --error-exitcode=1 --std=c++17 --quiet \
 		--suppress=missingIncludeSystem \
-		--suppress='*:include/internal/*' \
+		--suppress='*:include/mw/internal/*' \
 		-Iinclude src demos
 
 check: check-headers cppcheck tidy
@@ -241,6 +263,100 @@ compile_commands.json:
 	done
 	$(Q)printf '\n]\n' >> $@
 	$(call say,GEN,$@)
+
+# ---------------------------------------------------------------------------
+# 导出：静态库 / 共享库 / pkg-config / install
+# ---------------------------------------------------------------------------
+# 默认只出 `.a`，理由写在 docs/api.md。简单说：这个库的接口里有模板、
+# 有 inline、有 header-only 的 expected，而且要求消费者用一致的
+# -fno-exceptions 与 C++17 —— 这些约束 `.so` 一个都放松不了，
+# 却会额外引入符号可见性、soname、ABI 匹配三类新问题。
+#
+# 需要 .so 的场景只有一个：给别的语言做绑定。那时 `make SHARED=1`。
+
+SO_NAME    := lib$(PROJECT).so
+SO_SONAME  := $(SO_NAME).$(VER_MAJOR)
+SO_REAL    := $(SO_NAME).$(VERSION)
+
+PIC_OBJS   := $(LIB_SRCS:%.cpp=$(O)/pic/%.o)
+SHLIB      := $(O)/$(SO_REAL)
+
+$(O)/pic/%.o: %.cpp
+	$(call say,CXXPIC,$<)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(CXX) $(CXXFLAGS) -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -c $< -o $@
+
+$(SHLIB): $(PIC_OBJS)
+	$(call say,SHLIB,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(CXX) -shared -Wl,-soname,$(SO_SONAME) $(SANFLAGS) -o $@ $^ $(LDLIBS)
+	$(Q)ln -sf $(SO_REAL) $(O)/$(SO_SONAME)
+	$(Q)ln -sf $(SO_SONAME) $(O)/$(SO_NAME)
+
+shared: $(SHLIB)
+
+# -fvisibility=hidden 会把所有符号藏起来，导出表要靠显式标注。
+# 本工程**没有**这套标注，所以 SHARED=1 现在只是把机制搭好，
+# 真正用之前得先给公共符号加 MW_API。别在没验证过的情况下发出去。
+# TODO(export): 需要 .so 时补 include/mw/api.hpp 的 MW_API 宏并逐个标注。
+
+# 用 FORCE 强制每次重新生成：这个文件的内容依赖 PREFIX/LIBDIR 等**变量**，
+# 而 make 只看文件时间戳。不加 FORCE 的话，改了 PREFIX 再 install 会把上一次
+# 的路径原样装出去，消费者拿到一个指向不存在目录的 .pc —— 而且看起来很正常。
+$(O)/$(PROJECT).pc: FORCE
+	$(call say,GEN,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)printf '%s\n' \
+		'prefix=$(PREFIX)' \
+		'exec_prefix=$${prefix}' \
+		'libdir=$(LIBDIR)' \
+		'includedir=$(INCLUDEDIR)' \
+		'' \
+		'Name: $(PROJECT)' \
+		'Description: Minimal modern Linux display engine (atomic KMS + GBM/EGL + DMA-BUF)' \
+		'Version: $(VERSION)' \
+		'Requires: libdrm gbm egl glesv2' \
+		'Libs: -L$${libdir} -l$(PROJECT) -ldl' \
+		'Libs.private: -ldl' \
+		'Cflags: -I$${includedir}' \
+		> $@
+
+# 版本号有两个家（Makefile 与 version.hpp），所以必须有人核对。
+# 装出去之后再发现不一致，代价是消费者拿到一个 soname 与内容不符的库。
+check-version:
+	$(Q)hdr=$$(sed -n 's/^#define MW_VERSION_MAJOR \([0-9]*\).*/\1/p;' include/mw/version.hpp); \
+	hdrmin=$$(sed -n 's/^#define MW_VERSION_MINOR \([0-9]*\).*/\1/p;' include/mw/version.hpp); \
+	hdrpat=$$(sed -n 's/^#define MW_VERSION_PATCH \([0-9]*\).*/\1/p;' include/mw/version.hpp); \
+	if [ "$$hdr.$$hdrmin.$$hdrpat" != "$(VERSION)" ]; then \
+		echo "error: version mismatch: Makefile says $(VERSION), version.hpp says $$hdr.$$hdrmin.$$hdrpat"; \
+		exit 1; \
+	fi
+
+install: check-version lib $(O)/$(PROJECT).pc
+	$(call say,INSTALL,$(DESTDIR)$(PREFIX))
+	$(Q)install -d $(DESTDIR)$(LIBDIR) $(DESTDIR)$(PCDIR)
+	$(Q)install -m 644 $(LIB) $(DESTDIR)$(LIBDIR)/
+	$(Q)install -m 644 $(O)/$(PROJECT).pc $(DESTDIR)$(PCDIR)/
+	$(Q)for h in $(PUBLIC_HEADERS); do \
+		install -d $(DESTDIR)$(INCLUDEDIR)/$$(dirname $${h#include/}); \
+		install -m 644 $$h $(DESTDIR)$(INCLUDEDIR)/$${h#include/}; \
+	done
+	$(Q)if [ -f $(SHLIB) ]; then \
+		install -m 755 $(SHLIB) $(DESTDIR)$(LIBDIR)/; \
+		ln -sf $(SO_REAL) $(DESTDIR)$(LIBDIR)/$(SO_SONAME); \
+		ln -sf $(SO_SONAME) $(DESTDIR)$(LIBDIR)/$(SO_NAME); \
+	fi
+	@echo "  installed $(PROJECT) $(VERSION) into $(DESTDIR)$(PREFIX)"
+	@echo "  consumers: pkg-config --cflags --libs $(PROJECT)"
+
+FORCE:
+
+uninstall:
+	$(call say,RM,$(DESTDIR)$(PREFIX))
+	$(Q)rm -rf $(DESTDIR)$(INCLUDEDIR)/mw
+	$(Q)rm -f $(DESTDIR)$(LIBDIR)/lib$(PROJECT).a
+	$(Q)rm -f $(DESTDIR)$(LIBDIR)/$(SO_NAME)*
+	$(Q)rm -f $(DESTDIR)$(PCDIR)/$(PROJECT).pc
 
 clean:
 	$(Q)rm -rf build
