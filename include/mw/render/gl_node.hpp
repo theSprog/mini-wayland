@@ -119,7 +119,7 @@ struct GlNode {
      *
      * 这本身是结论，不是工具故障。但**成因未必在用户态**：内核里的
      * `BUG_ON` 也会把当前任务打成 SIGSEGV，从 `waitpid` 看和用户态段错误
-     * 一模一样。实测就撞上过后者（见 docs/step2-probe-results.md）。
+     * 一模一样。实测就撞上过后者（见 docs/lessons.md L-3）。
      * 所以报告里要提醒去看 dmesg —— 那是唯一能分开这两种情况的地方。
      */
     bool crashed = false;

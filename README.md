@@ -12,14 +12,14 @@ C++17，纯 Makefile，目标规模 1.5w ~ 2w 行。
 make                      # debug
 make BUILD=release
 make SANITIZE=1           # ASan + UBSan（输出到 build/debug-asan）
-make WERROR=1             # 提交前跑一次
 make check-headers        # 每个 .hpp 单独编译
 make check                # check-headers + cppcheck + clang-tidy
 make compile_commands.json
 make V=1
 ```
 
-依赖：`libdrm-dev`。Step 2 起会加 `libgbm-dev` / `libegl-dev` / `libgles2-mesa-dev`。
+依赖：`libdrm-dev`、`libgbm-dev`、`libegl-dev`、`libgles2-mesa-dev`。
+`-Werror` 是默认开的，不是可选开关。
 
 ## 跑
 
@@ -42,9 +42,14 @@ make V=1
 ./build/debug/bin/probe_caps --no-isolate  # 不 fork，给 gdb 看崩在哪用
 ./build/debug/bin/probe_caps -x /dev/dri/renderD129 -x /dev/dri/card1  # 排除会 oops 内核的节点
 
-# vendor KMD bug 的独立复现（不依赖本项目，可单独打包发给驱动同事）
-sudo repro/dmabuf-import-bug/run.sh -i renderD129 -s 0   # 对照，必须不崩
-sudo repro/dmabuf-import-bug/run.sh -i renderD129 -s 3   # 触发 BUG_ON
+# vendor KMD bug 的独立复现（只用 libc + DRM uapi，可单独打包发给驱动同事）
+cc -O1 -Wall -o /tmp/mini repro/vpu-import-bug/mini.c && sudo /tmp/mini   # 导入后关 fd -> 内核 BUG_ON
+cc -O1 -Wall -o /tmp/mini repro/dpu-import-bug/mini.c $(pkg-config --cflags --libs gbm) && sudo /tmp/mini
+                                                          # 导入静默失效：ret=0 但映射全零
+cc -O1 -Wall -o /tmp/mini repro/wb-oneshot-fault/mini.c $(pkg-config --cflags --libs libdrm)
+sudo /tmp/mini && dmesg | tail -50   # writeback 提交后引擎不停：释放 buffer 即 MMU 故障风暴
+
+./build/debug/bin/smoke_ipc        # mw/ipc 自检：线格式 / SCM_RIGHTS / 签名，不碰硬件
 
 ./build/debug/bin/step2_prime_roundtrip            # PRIME 导出/导入正确性
 ./build/debug/bin/step2_prime_roundtrip -s 1920x1080   # 用真实分辨率压 stride 对齐
@@ -65,7 +70,29 @@ sudo ./build/debug/bin/step2_gbm_scanout --draw gl          # 同上，改用 GL
 sudo ./build/debug/bin/step2_gbm_scanout -s render --draw gl  # 渲染侧分配 + GL（modifier 链路）
 sudo ./build/debug/bin/step2_gbm_scanout --no-modifiers     # 模拟无 IN_FORMATS 的驱动
 sudo ./build/debug/bin/step2_gbm_scanout -g /dev/dri/card2  # 指定 GBM/EGL 用哪个节点
+
+# writeback connector 可用性探针（回答 docs/open-questions.md Q-1~Q-4）
+sudo ./build/debug/bin/probe_writeback                 # 只枚举 + TEST_ONLY，安全
+sudo ./build/debug/bin/probe_writeback --commit        # 真提交并回读，可能卡 10s
+
+# Step 3：client 进程分配并绘制，server 导入上屏
+sudo ./build/debug/bin/step3_dmabuf_ipc --spawn -f 600      # 一条命令跑完整条链路
+sudo ./build/debug/bin/step3_dmabuf_ipc --spawn --verify=8  # 带 L1/L2 内容判据
+sudo ./build/debug/bin/step3_dmabuf_ipc                     # 只起 server，等 client 连
+./build/debug/bin/step3_dmabuf_ipc --role client -D /dev/dri/cardN   # 另一个终端
+sudo ./build/debug/bin/step3_dmabuf_ipc --spawn --fault bad-stride   # 故障注入
 ```
+
+验收一把跑完（分阶段、带日志、自动判定）：
+
+```bash
+./scripts/step3-acceptance.sh --phase 0              # 不需要 root
+sudo ./scripts/step3-acceptance.sh -D /dev/dri/card2 # 全部四个阶段
+```
+
+`--fault` 的取值：`bad-stride` `bad-offset` `missing-fd` `extra-fd` `not-dmabuf`
+`tiny-buffer` `bad-modifier` `stale-header` `half-message`。每一条都必须被 server
+拒绝、给出能定位的错误、不崩溃、不上屏、不泄漏 fd。
 
 `--draw cpu` 与 `--draw gl` 的差别只有"谁往 buffer 里写像素"这一段，
 modeset / 帧循环 / 记账是同一份代码。先跑通 cpu 再切 gl —— GL 出问题时
@@ -83,12 +110,20 @@ scripts/             环境勘察脚本
 docs/                见下
 ```
 
-| 文档 | 内容 |
-| --- | --- |
-| `docs/env.md` | 目标环境的实测现状：节点拓扑、caps、KMS 资源、未解决问题 |
-| `docs/stepN-design.md` | 该 step 的设计取舍与实现中撞到的坑（给自己看） |
-| `docs/internal-lib.md` | `include/internal/` 的本地改动与使用约定 |
-| `learning-notes/NN-*.md` | 该 step 的技术长文（给别人看，见下） |
+| 文档 | 内容 | 维护方式 |
+| --- | --- | --- |
+| `docs/README.md` | 文档结构与写作规则 | — |
+| `docs/env.md` | 目标环境**当前**为真的事实，唯一信源 | 覆盖写 |
+| `docs/open-questions.md` | 未解决 / 待验证 / `TODO(...)` 索引，唯一信源 | 关闭即删 |
+| `docs/env-log/` | 实测原始输出存档 | 只增不改 |
+| `docs/stepN-design.md` | 该 step 的**最终**设计与取舍 | 收尾时重写 |
+| `docs/lessons.md` | 跨 step 的方法论教训 | 只增 |
+| `docs/vendor-kmd-notes.md` | 厂商 KMD 读码结论（推论，非实测） | 驱动更新时改 |
+| `docs/internal-lib.md` | `include/internal/` 的本地改动与使用约定 | — |
+| `learning-notes/NN-*.md` | 该 step 的技术长文（给别人看，见下） | 发布后不动 |
+
+三条规则见 `docs/README.md`：一个事实只有一个家；step 设计文档收尾时重写而不是追加；
+状态词只有"已确认 / 未解决 / 待验证"三个。
 
 ## 分层约定
 
@@ -99,6 +134,7 @@ docs/                见下
 | `mw/gbm` | `<gbm.h>` + `mw/drm` | 只做分配，不碰 KMS |
 | `mw/egl` | `<EGL/*>` + `mw/gbm` | dmabuf ↔ EGLImage |
 | `mw/render` | `<GLES*/*>` + 以上全部 | 归一成 `ScanoutBuffer` |
+| `mw/ipc` | 标准库 + `mw/core` + `mw/drm` 的强类型 | **不得**包含 libdrm / EGL / GL / GBM；判据是能在没有 GPU 的机器上编译并单测 |
 | 再往上 | **不得**包含 `xf86drm*.h` / EGL / GL / GBM | 只能用 `mw/render` 暴露的类型 |
 
 `mw/render` 之上看不见 EGL / GL / GBM。Step 5 的 plane 分配器只该看见
@@ -205,29 +241,31 @@ VKMS 过而 vsdrm 不过 ⇒ 大概率 KMD 问题；反过来 ⇒ 代码有 vend
 | 篇目 | 主题 |
 | --- | --- |
 | `01-从一块内存到一块屏幕.md` | 显示物理层、KMS 对象模型、atomic 提交、显存、帧生命周期、探查方法 |
+| `02-让-GPU-参与进来.md` | GBM 分配、PRIME 跨设备、EGL/GLES 渲染到 dmabuf、modifier 协商 |
+| `03-让另一个进程来画.md` | SCM_RIGHTS 传 fd、线格式、信任边界、release 时机、三层内容判据 |
 
 ## 进度
 
 - [x] Step 0：环境勘察
 - [x] Step 1：atomic KMS + dumb buffer 点屏
-- [ ] Step 2：PRIME 跨设备 + format modifiers + GBM/EGL（进行中）
-  - [x] `mw/drm/prime.hpp` —— 导出/导入 + handle 引用计数
-  - [x] `demos/probe_render`、`demos/step2_prime_roundtrip`
-  - [x] 板上探测，结果见 `docs/step2-probe-results.md`
-  - [x] `mw/gbm/`（分配）、`mw/egl/`（dmabuf ↔ EGLImage）
-  - [x] `mw/render/buffer_source`：显示侧 / 渲染侧两条分配路径
-  - [x] `demos/probe_caps` + `scripts/check-env.sh`：能力闸门
-  - [x] `mw/render/target`（EGLImage → renderbuffer / texture → FBO）
-  - [x] `mw/render/swapchain`（N 组 buffer + 渲染目标的轮转）
-  - [x] `demos/step2_gbm_scanout`：`--draw cpu|gl`、`-s scanout|render`、`--no-modifiers`
-  - [x] `mw/render/gl_node`：实测哪个节点能跑 GL，不用元数据配对
-  - [x] 板上闸门探测：硬件 GL 在 renderD130 / card3 / card2，显示侧分配 → GL 渲染方向打通
-  - [x] 板上端到端验收：1920x1080@60，269 帧 0 丢帧，稳态每帧仅 1 次 atomic_commit
-  - [x] 闸门与端到端结果写回 `docs/step2-probe-results.md`
-  - [x] `learning-notes/02-让-GPU-参与进来.md`
-  - [x] `-s render --draw gl` 端到端跑一次
-- [ ] Step 3：DMA-BUF 跨进程 direct scanout
+- [x] Step 2：PRIME 跨设备 + format modifiers + GBM/EGL
+      （1920x1080@60 / 600 帧 / 0 丢帧，两条分配路径都通，见 `docs/step2-design.md`）
+- [x] Step 3：DMA-BUF 跨进程 direct scanout
+      （两条路径 600 帧 / 60fps / dropped=0，九条故障注入全部被拒）
+  - [x] `mw/ipc/wire`：线格式、校验、与 `DmabufDesc` 互转、CRC
+  - [x] `mw/ipc/socket`、`mw/ipc/channel`：SEQPACKET + `SCM_RIGHTS`
+  - [x] `mw/ipc/signature`：画进像素的内容判据（L1/L2）
+  - [x] `mw/drm/dmabuf_map`：`mmap(dmabuf)` + `DMA_BUF_IOCTL_SYNC`
+  - [x] `demos/smoke_ipc`：34 条自检，开发机上随时可跑
+  - [x] `demos/step3_dmabuf_ipc`：`--role`、`--spawn`、`--verify`、`--fault`
+  - [x] 板上验收：两条分配路径 600 帧 / 60fps / dropped=0，scanout 路径内容判据 8/8
+  - [x] 九条 `--fault` 逐条过，错误信息均可定位
+  - [x] ~~VKMS 端到端~~：这版 VKMS 无 PRIME 导出，Step 3 起没有 VKMS 覆盖（见 `docs/env.md`）
+  - [x] `learning-notes/03-让另一个进程来画.md`
+  - [x] `demos/probe_writeback`：Q-1~Q-4 全部答完，writeback 可作 Step 5 的显示侧判据
+  - [x] `learning-notes/03-让另一个进程来画.md`
+  - [x] `demos/probe_writeback`：Q-1~Q-4 全部答完，writeback 可作 Step 5 的显示侧判据
 - [ ] Step 4：最小 wayland server
 - [ ] Step 5：硬件 plane 分配器（TEST_ONLY 试探 + 降级）
 - [ ] Step 6：DRM syncobj 显式同步
-- [ ] Step 7：presentation timing / frame pacing
+- [ ] Step 7：presentation timing 与 frame pacing

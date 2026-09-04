@@ -1,8 +1,14 @@
 # 目标环境
 
-> 状态：Step 2 的 GL 路径打通后复核过一遍，下面写的都是**当前实测结论**。
-> 早期勘察中被推翻的说法已删除，不保留历史版本。
-> 最后更新：2026-08-31
+> **本文是环境事实的唯一信源。** 其它文档（step 设计、learning-notes、
+> 代码注释）一律引用本文，不复制其中的数字。
+>
+> 维护方式：**覆盖写**。被推翻的说法直接删，不保留历史版本。
+> 只写实测到的东西；从源码推出来但没实测的进 `vendor-kmd-notes.md`。
+> 未解决 / 待验证 / `TODO(...)` 一律进 `open-questions.md`，本文不列。
+> 实测原始输出存档在 `env-log/`。
+>
+> 最后更新：2026-09-03（Step 2 端到端验收后复核）
 
 ---
 
@@ -68,16 +74,20 @@ drm_file。跨节点用 buffer 只能走 PRIME。
 | 方向 | 当前实测 | 说明 |
 | --- | --- | --- |
 | 显示设备分配 → GPU 渲染（ScanoutDevice） | **通** | renderD130 / card3 / card2 上导入成功，走首选的 renderbuffer 路径 |
-| GPU 分配 → 显示设备扫描（RenderDevice） | **通**（2026-08-31 起） | KMD 修复跨设备导入后打开 |
+| GPU 分配 → 显示设备扫描（RenderDevice） | **通**（2026-09-03 起） | 见下面两段，中间有一次假的"通" |
 
-**两个方向现在都通。** 这是驱动演进的结果，不是代码变化的结果 ——
-早先 `drmPrimeFDToHandle(card2, fd)` 返回 EINVAL，KMD 侧修复后同一份
-用户态代码直接从 DEGRD 变 PASS。这正是把可用性做成运行时探测
+**两个方向现在都通，而且用户态代码一行没改。** 这正是把可用性做成运行时探测
 （而不是编译期假设或写死的路径选择）的收益。
 
-历史记录：修复前的失败点是 GPU 私有池分配的离散页 DPU 侧收不下
-（物理连续性要求，或未给 DPU 配 IOMMU 映射）。留着这条是因为
-换一块板子还会遇到同样的形状。
+这个方向修好过两次，两次的形状不一样，都要记住：
+
+1. **2026-08-31，响亮的失败。** `drmPrimeFDToHandle(card2, fd)` 返回 EINVAL。
+   KMD 修复后探测从 DEGRD 变 PASS。
+2. **2026-09-03，那个 PASS 是假的。** 探测的判据止步于 `addfb2` 成功，
+   而 `PRIME_FD_TO_HANDLE` / `addfb2` / `TEST_ONLY` / page flip
+   **四层没有一层碰过像素**。实际表现是 60 fps 一帧不掉、ioctl 完美配平、
+   屏幕全黑。根因是导入路径建出的 GTT 映射每一项都是 0，本地打补丁后正常。
+   复现程序 `repro/dpu-import-bug/`，方法论教训见 `lessons.md` L-1。
 
 ### 关键点四：显示节点上也能起硬件 GL
 
@@ -216,9 +226,18 @@ connector Virtual-2，preferred 1024x768
     megadriver 构建，这五个名字是同一个 `.so` 的别名
   - **没有 `hygpu_dri.so`**。所以 renderD128（driver name `hygpu`）加载不到
     对应驱动，Mesa 退到 softpipe。`kmsro: driver missing` 就是这么来的
-  - 在 renderD130 上分配时会看到 `MESA: error: ZINK: vkCreateImage failed`——
-    loader 试过 zink 路径，最终用的不是它（`GL_RENDERER` 不是 zink）
-- **Vulkan**：`/etc/vulkan/icd.d/` 下无可用 ICD ⇒ 不可用
+  - 在 renderD130 上分配时会看到 `MESA: error: ZINK: vkCreateImage failed`。
+    **这串只可能来自 zink**，所以这条路径上的 gallium 驱动很可能是
+    **zink over Vulkan**，`Hygon CJ` 是底下那个 Vulkan 设备的名字，
+    不是 GL 驱动名。分配失败后 zink 会自己重试并成功，那几条 ERROR 不致命，
+    但会让首帧分配变慢
+- **Vulkan**：`/etc/vulkan/icd.d/` 下没找到 ICD
+
+> **上面两条互相矛盾**：zink 要能跑就必须有一个能用的 Vulkan 驱动。
+> 二者必有一处不准，未裁决前都不要引用。见 `open-questions.md` C-2 / C-3。
+> 下游影响：modifier 支持面到底是谁的（zink 受 `VK_EXT_image_drm_format_modifier`
+> 限制）、Step 6 的 fence 要不要经 Vulkan semaphore ↔ syncobj 转换，
+> 都取决于这个裁决。
 
 已确认可用的 EGL 扩展（在 renderD130 上测得，Step 2/3/6 依赖）：
 
@@ -234,55 +253,52 @@ EGL_KHR_fence_sync / EGL_KHR_wait_sync
 **判断一个节点能不能跑 GL 的可靠方法只有一个：真建一次。**
 `probe_caps` 会打出全部候选节点的表格，包括失败的和它们的原因。
 
-## 六、未解决问题
+## 五之二、跨进程共享（Step 3 实测，2026-09-04）
 
-| # | 问题 | 状态 | 处理 |
-| --- | --- | --- | --- |
-| 1 | vsdrm atomic commit 返回 EBUSY | **未复现**。自有代码 600 帧零丢帧跑通 | 推测是完整 modeset（不读当前状态、不做增量）绕过了状态残留。kmscube 走的提交序列不同 |
-| 2 | 私有 modifier `AddFB2WithModifiers` 返回 EINVAL | 未解决 | `Framebuffer::add_with_fallback()` 降级到不带 modifier 的 AddFB2，并 WARN |
-| 3 | 无 debugfs（`CONFIG_DEBUG_FS` 未开） | 未解决 | CRC 自动化校验推迟到 v11 |
-| 4 | Vulkan 不可用（无 hygon ICD） | 未解决 | fallback 渲染器用 GLES3 |
-| 5 | Mesa 22.3.5 偏旧 | 未解决 | `linux-drm-syncobj-v1` 客户端支持需 Mesa 24.1+，Step 6 自写测试客户端 |
-| 6 | hantro 节点（renderD129 / card1）导入 dmabuf 后关 fd，**内核 BUG_ON**（`dma_buf_release`，`dma-buf.c:89`） | 未解决，**已隔离** | vendor KMD bug，按项目原则不修。`probe_gl_nodes()` 每个候选跑在独立子进程里；子进程被隔离了但内核没有，所以日常跑加 `-x /dev/dri/renderD129 -x /dev/dri/card1` |
-| 7 | IN_FORMATS 解析验证 | **已确认**。`probe_kms -F` 自校验全部通过 | 8 个 plane 的 blob 全部内部自洽（popcount 总和与解析出的 pair 数一致）。早期文档记录的"只有 3 个 modifier"是截断，实际 plane#34/44/87/97 各有 17 个 |
+| 观察 | 结论 |
+| --- | --- |
+| `mmap(dmabuf_fd)` 于 GPU（pvr）导出的 buffer | **EACCES**。导出方在策略上拒绝 CPU 映射，不是没实现。用 `DRM_RDWR` 重新导出也没用 |
+| `mmap(dmabuf_fd)` 于显示节点（vsdrm）dumb 导出的 buffer | 可用，读回正常 |
+| VKMS（`card4`，内核 5.4）`drmPrimeHandleToFD` | **ENOSYS**。这版 VKMS 完全没有 PRIME 导出 |
+| `gbm_bo_map()` 于 renderD130（zink） | **给的是 staging buffer**：长期持有映射、从不 unmap 时，写进去的像素永远不会回到 bo。必须每帧 map/unmap |
 
-关于问题 1 的补充观察（供参考，非结论）：
-dmesg 显示 EBUSY 时 crtc#84 的 vblank 仍在持续更新（每 16.6ms 一次），
-但 `lsof /dev/dri/card2` 无任何进程。推测是 X11 或前一个 client 退出后
-KMS 状态未正确 teardown；重启后仍复现。legacy `drmModeSetCrtc` 会强制
-重设整个 CRTC 状态，故不受影响。
+| `addfb2` 对 modifier 字段的校验 | **不校验**。一个纯属编造的私有 modifier 也会被收下并建出 fb |
 
-这也正是本项目采用**无条件完整 modeset**（不读当前状态、不做增量）的原因。
+四条推论：
 
-## 七、TODO 标记
+1. **Step 3 在 VKMS 上没有覆盖。** 跨进程共享的前提是 PRIME 导出，
+   这版 VKMS 一个都给不了。双环境验证到 Step 2 为止；
+   Step 3 起 VKMS 只能验 KMS 层不回归。`TODO(kernel-6.6)`：v11 的 VKMS 支持 PRIME 后重新纳入。
+2. **渲染侧分配路径上没有任何内容判据。** L2 依赖 `mmap(dmabuf)`，而那条路上它被拒绝。
+   这不是代码问题，是导出方策略。补上它只能靠 writeback（见 `open-questions.md` Q-1~Q-4）。
+3. 第 4 条已经真的放过了一次黑屏 —— 见 `lessons.md` L-15。
+4. **合成器必须自己校验 client 送来的 (format, modifier)**，
+   不能指望内核挡住它。判据是自己公告过的那份集合。见 `lessons.md` L-17。
 
-写在对应代码位置，便于 grep：
+## 五之三、writeback connector（2026-09-04 实测）
 
-```
-TODO(kernel-6.6):   atomic async page flip（DRM_MODE_PAGE_FLIP_ASYNC 需 6.8+）
-TODO(kernel-6.6):   debugfs CRC 自动化校验
-TODO(mesa-24.1):    linux-drm-syncobj-v1 标准客户端接入
-TODO(vulkan-icd):   无可用 Vulkan ICD，fallback 渲染器用 GLES3
-TODO(kmd-atomic):   vsdrm atomic commit EBUSY，用 --dry-run + bisect 定位
-TODO(kmd-modifier): 私有 modifier addfb2 EINVAL，走 add_with_fallback 降级
-TODO(hotplug):      Step 4 接 udev monitor 后由事件驱动 rescan
-TODO(vt):           VT 切换（KDSETMODE、VT_PROCESS）
-TODO(writeback):    有 2 个 writeback connector，可做无显示器自检管线
-TODO(plane-info-blob): 每个 plane 有 immutable blob "INFO"，实测 **4 字节**
-                    （仅 rotation）。CRTC 上另有 "DC_INFO" blob，36 字节，
-                    尚未解析。读时按 blob 实际长度读，不要按结构体 memcpy。
-TODO(dc-info-blob): CRTC 的 DC_INFO blob（36 字节）内容未知，可能含
-                    max_blend_layer 之类的整机限制。Step 5 之前解一次。
-TODO(dc-exception): 硬件异常（含 BE_UNDERRUN）经 SIGUSR2 上报，机制不适合
-                    合成器直接用。等驱动侧改成 DRM event 再接。
-(已关闭) TODO(hw-import):  GPU 分配 -> DPU 导入。2026-08-31 KMD 修复后通过，
-                    用户态代码未改动。
-TODO(syncobj-timeline): 渲染节点 renderD130 报 SYNCOBJ_TIMELINE=0，
-                    linux-drm-syncobj-v1 暂时提供不了。合成器自身的显式同步
-                    走 EGL_ANDROID_native_fence_sync + IN_FENCE_FD，不受影响。
-TODO(kmd-hantro):   hantro 节点导入 dmabuf 后关 fd 会 BUG_ON 内核
-                    （dma_buf_release）。与本项目无关，用 -x 排除。
-```
+| 项 | 结果 |
+| --- | --- |
+| 数量 | 2 个：`conn#77`（Writeback-1）→ `crtc#31`，`conn#127`（Writeback-2）→ `crtc#84` |
+| `WRITEBACK_FB_ID` / `WRITEBACK_PIXEL_FORMATS` / `WRITEBACK_OUT_FENCE_PTR` | 三个全在，两个 connector 一致 |
+| 可写格式（19） | AR24 AB24 RA24 BA24 RG24 BG24 AR30 AB30 RA30 BA30 YV12 YU12 NV12 NV21 NV16 NV61 P010 P210 YU10。**没有 XR24** |
+| `WB_POINT` 默认值 | 0（按 `vendor-kmd-notes.md` 即 `VS_WB_DISP_OUT`，抓显示输出那一级） |
+| 其余厂商属性 | `WB_CROP` / `WB_DITHER` / `DATA_TRUNC` / `DOWN_SAMPLE` / `R2Y` 默认全 0，**一律不设** |
+| writeback connector 自报 mode | 3200x1920（是它能写多大，不是某个显示器的时序） |
+| 与显示 connector 同 CRTC 共存 | **可以**。`conn#127` + HDMI-A-1 同挂 `crtc#84`，TEST_ONLY 通过、提交成功、抓到内容 —— 屏幕照常亮的同时拿到一份回写 |
+| flip 完成事件 | **正常到达**。写回提交后 page flip 事件在 2 秒超时内返回，没有出现担心的 10 秒 `flip_done` 超时（`atomic_commit_tail` 缺 `fake_vblank` 只影响 `no_vblank` 的 CRTC，这两个 CRTC 都有真实时序） |
+| `WRITEBACK_OUT_FENCE_PTR` | 内核正常回填 fence fd，poll 到 signal 后回读安全 |
+| **副作用（重要）** | 一次提交之后 DPU 持续往那块 buffer 写。释放后即 GPU MMU 每帧每页 page fault，见 `open-questions.md` U-10 与 `repro/wb-oneshot-fault/` |
+| 回读内容 | **逐点精确相等**。8 个采样点写什么读回什么（源 XR24 → 目标 AR24，抹掉高 8 位后比对），说明 `WB_POINT=0` 抓的确实是显示输出那一级，且通路上没有色彩转换 |
+
+`crtc#31` 上没有已连接的显示 connector，所以那一路只能走 headless。
+
+## 六、未解决问题 / 待验证 / TODO
+
+**不在本文。** 全部收进 `open-questions.md`，那是唯一的一份。
+
+本文只写"现在为真的事实"；一条问题关闭时，把结论写进本文对应章节，
+再从 `open-questions.md` 删掉那一条。
 
 ## 八、常用命令
 

@@ -181,15 +181,7 @@ drmModeAddFB2WithModifiers()  显式传，需要 DRM_CAP_ADDFB2_MODIFIERS + DRM_
 
 ### 3. 降级路径因错误域不匹配而永远不触发
 
-`add_with_fallback()` 用 `errno_of(first.error())` 判断该不该降级，
-但 `add()` 返回的是 **drm 域**错误，`errno_of` 恒返回 0——
-vsdrm 私有 modifier 那条降级逻辑写了等于没写。
-
-改法：把下发 ioctl 那层拆成返回 `int errno` 的内部函数，两个公开接口共用。
-顺带省掉降级路径上白构造一个 Error。
-
-这个 bug 光看代码很难发现——两个函数分别都对，错在跨函数的错误域假设上。
-cppcheck 报的其实是另一件事（`if (x) return x;` 后面又 `return x`），顺着看才发现。
+跨函数的错误域假设，两个函数分别都对。见 `lessons.md` L-13。
 
 ### 4. `fmt()` 不支持宽度对齐
 
@@ -211,46 +203,14 @@ cppcheck 报的其实是另一件事（`if (x) return x;` 后面又 `return x`�
 
 ### 7. 资源泄漏报告的假阳性
 
-第一次跑完，`report_leaks_on_exit()` 报告 property blob 泄漏了一个。
-
-排查发现不是真泄漏：统计函数在 `run()` 内部调用，
-而 blob / dumb buffer / framebuffer 都是 `run()` 的局部变量，
-此时还没轮到析构。
-
-最初的绕法是用一个内层作用域提前销毁一部分对象——
-**那本身就是设计走偏的信号**。正确做法是把统计挪到 `main()`，
-等 `run()` 完整返回、所有局部对象析构完再统计。
-
-值得记一笔的是：**误报本身也有价值**，它逼着把
-"资源到底什么时候真正释放"想清楚了一遍。
+统计点放在了对象析构之前。见 `lessons.md` L-12。
 
 ### 8. 配平表把"模式"当成了"资源"
 
-第一个假阳性修完之后，又出来一条：
-
-```
-WARN resource leak: drm master acquired=0 released=1 (delta=18446744073709551615)
-```
-
-两个问题叠在一起：
-
-**建模错了。** 打开一个没人占用的 DRM 节点时会**隐式成为 master**，
-不产生任何 ioctl。所以 `acquire_master()` 走的是"已经是 master"的分支，
-`set_master` 计数没涨；而析构照常调 `drmDropMaster`，`drop_master` 涨到 1。
-
-根因是把 master 放进了"create/destroy 配平表"。但 master 不是分配出来的
-内核对象，是一个**模式**：获取有两种方式（隐式继承 / 显式 ioctl），
-释放只有一种。它不满足配平表的前提。
-
-修法是把它从表里拿掉，单独报告状态。配平表的准入判据也写进注释了：
-**有且只有一种获取方式、有且只有一种释放方式、两者一一对应。**
-
-**显示也错了。** `acquired - released` 是 `uint64_t` 相减，
-负数下溢成天文数字。而"释放多于获取"本身是同样值得警惕的情况
-（说明有 double free 或者计数逻辑错了），不该被下溢掩盖。
-现在两个方向分别报告。
+DRM master 不是分配出来的内核对象，不满足配平表的准入判据。
+见 `lessons.md` L-11。
 
 ## 下一步
 
-Step 2：format modifiers + GBM/EGL。
+Step 2：format modifiers + GBM/EGL，见 `step2-design.md`。
 届时加 `libgbm-dev` / `libegl-dev` / `libgles2-mesa-dev` 三个依赖。
