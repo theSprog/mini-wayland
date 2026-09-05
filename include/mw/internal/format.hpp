@@ -124,10 +124,40 @@ inline std::string format_error(const std::string& msg) {
     return "<?>(" + msg + ")";
 }
 
-// 拆分 format 字符串为若干文本或 "{...}" 片段
-inline std::vector<std::string> parse_format(const std::string& fmt) {
-    std::vector<std::string> parts;
+// format 字符串的一个片段：字面量文本，或一个占位符。
+//
+// is_slot 这个标记不能省。转义之后的字面量可能恰好长成 "{}"（来自 "{{}}"）或
+// "{x}"（来自 "{{x}}"），单看字符串没法跟真占位符区分——早期版本就是靠
+// front()=='{' && back()=='}' 判断的，于是 fmt("{{}}") 会去要一个不存在的参数。
+struct FormatPart {
+    bool is_slot;
+    std::string text; // 占位符时存冒号及其后的 spec（不含花括号），字面量时存原文
+
+    FormatPart() : is_slot(false), text() {}
+    FormatPart(bool slot, std::string t) : is_slot(slot), text(std::move(t)) {}
+};
+
+// parse_format 的结果。error 非空表示解析失败，此时 parts 无意义。
+struct ParsedFormat {
+    std::vector<FormatPart> parts;
+    std::string error;
+
+    ParsedFormat() : parts(), error() {}
+};
+
+// 拆分 format 字符串为若干字面量或占位符片段
+inline ParsedFormat parse_format(const std::string& fmt) {
+    ParsedFormat out;
     std::string buf;
+
+    // 把攒着的字面量吐出去
+    auto flush = [&]() {
+        if (! buf.empty()) {
+            out.parts.emplace_back(false, buf);
+            buf.clear();
+        }
+    };
+
     const char* p = fmt.c_str();
     while (*p) {
         if (*p == '{') {
@@ -135,13 +165,15 @@ inline std::vector<std::string> parse_format(const std::string& fmt) {
                 buf += '{';
                 p += 2;
             } else {
-                parts.push_back(buf);
-                buf.clear();
+                flush();
                 ++p;
                 const char* start = p;
                 while (*p && *p != '}') ++p;
-                if (! *p) return {format_error("unmatched '{'")};
-                parts.push_back("{" + std::string(start, p) + "}");
+                if (! *p) {
+                    out.error = format_error("unmatched '{'");
+                    return out;
+                }
+                out.parts.emplace_back(true, std::string(start, p));
                 ++p;
             }
         } else if (*p == '}') {
@@ -149,14 +181,15 @@ inline std::vector<std::string> parse_format(const std::string& fmt) {
                 buf += '}';
                 p += 2;
             } else {
-                return {format_error("unmatched '}'")};
+                out.error = format_error("unmatched '}'");
+                return out;
             }
         } else {
             buf += *p++;
         }
     }
-    if (! buf.empty()) parts.push_back(buf);
-    return parts;
+    flush();
+    return out;
 }
 
 // to_string 重载：vector
@@ -282,7 +315,7 @@ inline std::string maybe_format_integer(bool val, IntBase, std::true_type) {
 // 递归展开 tuple，根据 arg_index 调用对应格式化
 template <size_t I, typename Tuple>
 typename std::enable_if<I == std::tuple_size<Tuple>::value, void>::type
-apply_arg(std::ostringstream& oss, const std::string& /*part*/, size_t /*arg_index*/, const Tuple& /*tup*/) {
+apply_arg(std::ostringstream& oss, const std::string& /*spec*/, size_t /*arg_index*/, const Tuple& /*tup*/) {
     // 参数越界
     oss << format_error("not enough arguments");
 }
@@ -290,10 +323,8 @@ apply_arg(std::ostringstream& oss, const std::string& /*part*/, size_t /*arg_ind
 template <size_t I, typename Tuple>
     typename std::enable_if <
     I<std::tuple_size<Tuple>::value, void>::type
-    apply_arg(std::ostringstream& oss, const std::string& part, size_t arg_index, const Tuple& tup) {
+    apply_arg(std::ostringstream& oss, const std::string& spec, size_t arg_index, const Tuple& tup) {
     if (arg_index == I) {
-        // 取出 {spec}
-        std::string spec = part.substr(1, part.size() - 2);
         FormatSpec fs = parse_spec(spec);
         typedef typename std::remove_reference<typename std::tuple_element<I, Tuple>::type>::type ArgType;
         const ArgType& val = std::get<I>(tup);
@@ -308,7 +339,7 @@ template <size_t I, typename Tuple>
         oss << pad_to_width(rendered, fs);
     } else {
         // 继续下一个
-        apply_arg<I + 1>(oss, part, arg_index, tup);
+        apply_arg<I + 1>(oss, spec, arg_index, tup);
     }
 }
 
@@ -317,26 +348,26 @@ template <size_t I, typename Tuple>
 // 公共接口
 template <typename... Args>
 std::string fmt(const std::string& fmt_str, const Args&... args) {
-    std::vector<std::string> parts = parse_format(fmt_str);
-    // 如果 parse_format 返回单个错误
-    if (parts.size() == 1 && parts[0].rfind("<?>(", 0) == 0) {
-        return parts[0];
+    const ParsedFormat parsed = parse_format(fmt_str);
+    if (! parsed.error.empty()) {
+        return parsed.error;
     }
 
     std::ostringstream oss;
     std::tuple<const Args&...> tup(args...);
     size_t arg_index = 0;
 
-    for (size_t i = 0; i < parts.size(); ++i) {
-        const std::string& part = parts[i];
-        if (part.size() >= 2 && part.front() == '{' && part.back() == '}') {
-            apply_arg<0>(oss, part, arg_index, tup);
+    for (size_t i = 0; i < parsed.parts.size(); ++i) {
+        const FormatPart& part = parsed.parts[i];
+        if (part.is_slot) {
+            apply_arg<0>(oss, part.text, arg_index, tup);
             ++arg_index;
         } else {
-            oss << part;
+            oss << part.text;
         }
     }
-    
+
+
     if (arg_index < sizeof...(Args)) {
         oss << format_error("too many arguments");
     }
@@ -345,4 +376,3 @@ std::string fmt(const std::string& fmt_str, const Args&... args) {
 }
 
 } // namespace internal
-

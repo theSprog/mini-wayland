@@ -143,4 +143,11 @@ inline unexpected<Error> Err(Enum code,
     inline ErrorType make_error(ErrorCodeType code) {                                                        \
         return ErrorType(code);                                                                              \
     }
+
+/// 返回值统一别名：`Result<T>` / `Status`
+template <typename T>
+using Result = expected<T, Error>;
+
+using Status = expected<void, Error>;
+
 } // namespace internal

@@ -1,6 +1,7 @@
 // parse_args.hpp
 // 本文件是独立的、可复用的命令行参数解析器。
 // 和其他 internal:: 头文件不同，这个文件可以直接拷贝到其他项目里用，依赖 C++17 标准库即可
+// 适用于编写单次执行 CLI 命令行工具
 #pragma once
 
 #include <charconv>
@@ -19,7 +20,6 @@
 namespace internal {
 
 namespace parse_args {
-
 
 template<typename T>
 inline constexpr bool always_false_v = false;
@@ -89,14 +89,6 @@ static inline std::string extract_basename(std::string_view path) {
 }
 
 template <typename Config>
-struct ParseResult {
-    Config config;
-    std::optional<std::string> error;
-
-    explicit operator bool() const noexcept { return !error.has_value(); }
-};
-
-template <typename Config>
 class parser {
     struct Action {
         std::string short_opt;
@@ -104,7 +96,6 @@ class parser {
         std::string pos_name;
         std::string description;
 
-        // 显式初始化列表，修复 -Weffc++ 警告
         Action() : short_opt(), long_opt(), pos_name(), description() {}
         virtual ~Action() = default;
 
@@ -113,13 +104,13 @@ class parser {
         virtual bool is_optional_pos() const = 0;
         virtual bool is_variadic_pos() const = 0;
         virtual std::string type_hint() const = 0;
+        virtual bool is_help() const { return false; }
     };
 
     template <typename MemberType>
     struct MemberAction : Action {
         MemberType Config::*ptr;
 
-        // 显式调用基类构造，修复 -Weffc++ 警告
         explicit MemberAction(MemberType Config::*p) : Action(), ptr(p) {}
 
         bool execute(Config& cfg, std::string_view val) override {
@@ -134,7 +125,7 @@ class parser {
                 if (!from_string_impl(val, tmp)) return false;
                 cfg.*ptr = std::move(tmp);
                 return true;
-            } else if constexpr (is_vector_v<MemberType>) { // LCOV_EXCL_LINE
+            } else if constexpr (is_vector_v<MemberType>) {
                 typename MemberType::value_type tmp{};
                 if (!from_string_impl(val, tmp)) return false;
                 (cfg.*ptr).push_back(std::move(tmp));
@@ -144,17 +135,9 @@ class parser {
             }
         }
 
-        bool is_flag() const override {
-            return std::is_same_v<MemberType, bool>;
-        }
-
-        bool is_optional_pos() const override {
-            return is_optional_v<MemberType>;
-        }
-
-        bool is_variadic_pos() const override {
-            return is_vector_v<MemberType>;
-        }
+        bool is_flag() const override { return std::is_same_v<MemberType, bool>; }
+        bool is_optional_pos() const override { return is_optional_v<MemberType>; }
+        bool is_variadic_pos() const override { return is_vector_v<MemberType>; }
 
         std::string type_hint() const override {
             if constexpr (std::is_same_v<MemberType, bool>) {
@@ -177,15 +160,29 @@ class parser {
         }
     };
 
+    struct HelpAction : Action {
+        bool execute(Config&, std::string_view) override { return true; }
+        bool is_flag() const override { return true; }
+        bool is_optional_pos() const override { return false; }
+        bool is_variadic_pos() const override { return false; }
+        std::string type_hint() const override { return ""; }
+        bool is_help() const override { return true; }
+    };
+
 public:
-    // 显式初始化所有成员，修复 -Weffc++ 警告
     explicit parser(std::string description = "")
         : description_(std::move(description)),
           program_name_(),
           options_(),
           positionals_(),
           examples_(),
-          notes_() {}
+          notes_() {
+        auto help_act = std::make_shared<HelpAction>();
+        help_act->short_opt = "-h";
+        help_act->long_opt = "--help";
+        help_act->description = "Print this help message and exit";
+        options_.push_back(std::move(help_act));
+    }
 
     template <typename MemberType, typename... Args>
     parser& bind(MemberType Config::*member, Args&&... args) {
@@ -225,7 +222,8 @@ public:
         return *this;
     }
 
-    ParseResult<Config> parse(int argc, char* const argv[]) const {
+    // 解析并直接返回配置，遇到 -h 或错误时内部截断并退出
+    Config parse(int argc, char* const argv[]) const {
         Config cfg{};
         
         if (argc > 0 && argv[0]) {
@@ -234,6 +232,12 @@ public:
         if (program_name_.empty()) {
             program_name_ = "app";
         }
+
+        auto error_exit = [this](const std::string& msg) {
+            std::cerr << "Error: " << msg << "\n\n";
+            print_help(std::cerr);
+            std::exit(1);
+        };
 
         bool stop_options = false;
         size_t pos_idx = 0;
@@ -259,13 +263,19 @@ public:
 
                 auto opt_act = find_option(key);
                 if (!opt_act) {
-                    return {cfg, "Unknown option: " + std::string(key)};
+                    error_exit("Unknown option: " + std::string(key));
                 }
 
                 if (opt_act->is_flag()) {
                     if (inline_val.has_value()) {
-                        return {cfg, "Flag '" + std::string(key) + "' does not take a value"};
+                        error_exit("Flag '" + std::string(key) + "' does not take a value");
                     }
+                    
+                    if (opt_act->is_help()) {
+                        print_help(std::cout);
+                        std::exit(0);
+                    }
+
                     opt_act->execute(cfg, "");
                 } else {
                     std::string_view val;
@@ -273,27 +283,27 @@ public:
                         val = *inline_val;
                     } else {
                         if (i + 1 >= argc) {
-                            return {cfg, "Option '" + std::string(key) + "' requires a value"};
+                            error_exit("Option '" + std::string(key) + "' requires a value");
                         }
                         val = argv[++i];
                     }
 
                     if (!opt_act->execute(cfg, val)) {
-                        return {cfg, "Invalid value '" + std::string(val) + "' for option '" + std::string(key) + "'"};
+                        error_exit("Invalid value '" + std::string(val) + "' for option '" + std::string(key) + "'");
                     }
                 }
             } else {
                 if (pos_idx < positionals_.size()) {
                     auto& pos_act = positionals_[pos_idx];
                     if (!pos_act->execute(cfg, token)) {
-                        return {cfg, "Invalid value '" + std::string(token) + "' for positional argument '" + pos_act->pos_name + "'"};
+                        error_exit("Invalid value '" + std::string(token) + "' for positional argument '" + pos_act->pos_name + "'");
                     }
                     pos_satisfied[pos_idx] = true;
                     if (!pos_act->is_variadic_pos()) {
                         ++pos_idx;
                     }
                 } else {
-                    return {cfg, "Unexpected positional argument: " + std::string(token)};
+                    error_exit("Unexpected positional argument: " + std::string(token));
                 }
             }
         }
@@ -301,11 +311,11 @@ public:
         for (size_t j = 0; j < positionals_.size(); ++j) {
             const auto& act = positionals_[j];
             if (!pos_satisfied[j] && !act->is_optional_pos() && !act->is_variadic_pos()) {
-                return {cfg, "Missing required positional argument: " + act->pos_name};
+                error_exit("Missing required positional argument: " + act->pos_name);
             }
         }
 
-        return {cfg, std::nullopt};
+        return cfg;
     }
 
     void print_help(std::ostream& os = std::cout) const {
@@ -386,7 +396,8 @@ public:
 
 private:
     std::shared_ptr<Action> find_option(std::string_view key) const {
-        for (const auto& opt : options_) {
+        for (auto it = options_.rbegin(); it != options_.rend(); ++it) {
+            const auto& opt = *it;
             if (opt->short_opt == key || opt->long_opt == key) {
                 return opt;
             }
