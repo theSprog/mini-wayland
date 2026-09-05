@@ -23,7 +23,7 @@
 #include <cstring>
 #include <string>
 
-#include "mw/core/log.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/drm/device.hpp"
 #include "mw/drm/dump.hpp"
 #include "mw/drm/trace.hpp"

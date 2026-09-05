@@ -1,11 +1,10 @@
-#include "mw/display/screen.hpp"
-
 #include <cstdio>
 #include <ctime>
 #include <optional>
 #include <vector>
 
-#include "mw/core/log.hpp"
+#include "mw/internal/error.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/drm/atomic.hpp"
 #include "mw/drm/device.hpp"
 #include "mw/drm/error.hpp"
@@ -13,6 +12,11 @@
 #include "mw/drm/prime.hpp"
 #include "mw/drm/trace.hpp"
 #include "mw/render/swapchain.hpp"
+#include "mw/display/screen.hpp"
+
+using internal::Ok;
+using internal::Err;
+using internal::sys_err_ctx;
 
 namespace mw::display {
 

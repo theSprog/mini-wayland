@@ -57,7 +57,7 @@
 #include <string>
 #include <vector>
 
-#include "mw/core/log.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/drm/atomic.hpp"
 #include "mw/drm/device.hpp"
 #include "mw/drm/dumb_buffer.hpp"
@@ -67,6 +67,8 @@
 
 using namespace mw;
 using namespace mw::drm;
+
+using internal::Ok;
 
 namespace {
 

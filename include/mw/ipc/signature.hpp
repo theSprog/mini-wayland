@@ -53,8 +53,13 @@
 #include <cstdint>
 #include <string>
 
-#include "mw/core/error.hpp"
+#include "mw/internal/error.hpp"
+#include "mw/internal/span.hpp"
 #include "mw/drm/types.hpp"
+
+using internal::Result;
+using internal::Status;
+using internal::span;
 
 namespace mw::ipc {
 

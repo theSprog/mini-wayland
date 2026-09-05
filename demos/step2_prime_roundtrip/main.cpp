@@ -40,8 +40,8 @@
 #include <cstring>
 #include <string>
 
-#include "mw/core/log.hpp"
-#include "mw/core/unique_fd.hpp"
+#include "mw/trace/log.hpp"
+#include "mw/internal/unique_fd.hpp"
 #include "mw/drm/device.hpp"
 #include "mw/drm/dumb_buffer.hpp"
 #include "mw/drm/prime.hpp"

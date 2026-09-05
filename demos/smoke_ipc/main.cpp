@@ -21,7 +21,7 @@
 #include <cstring>
 #include <string>
 
-#include "mw/core/log.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/ipc/channel.hpp"
 #include "mw/ipc/error.hpp"
 #include "mw/ipc/signature.hpp"

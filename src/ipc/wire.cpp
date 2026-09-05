@@ -3,8 +3,12 @@
 #include <array>
 #include <utility>
 
-#include "mw/core/log.hpp"
+#include "mw/internal/error.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/ipc/error.hpp"
+
+using internal::Ok;
+using internal::Err;
 
 namespace mw::ipc {
 

@@ -1,9 +1,12 @@
-#include "mw/render/swapchain.hpp"
-
 #include <utility>
 
-#include "mw/core/log.hpp"
+#include "mw/internal/error.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/drm/error.hpp"
+#include "mw/render/swapchain.hpp"
+
+using internal::Ok;
+using internal::Err;
 
 namespace mw::render {
 

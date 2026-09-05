@@ -45,10 +45,14 @@
 #include <cstring>
 #include <type_traits>
 
-#include "mw/core/error.hpp"
-#include "mw/core/unique_fd.hpp"
+#include "mw/internal/span.hpp"
+#include "mw/internal/error.hpp"
+#include "mw/internal/unique_fd.hpp"
+#include "mw/internal/unique_fd.hpp"
 #include "mw/drm/prime.hpp"
 #include "mw/drm/types.hpp"
+
+using internal::span;
 
 namespace mw::ipc {
 

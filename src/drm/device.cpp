@@ -1,5 +1,3 @@
-#include "mw/drm/device.hpp"
-
 #include <dirent.h>
 #include <fcntl.h>
 #include <xf86drm.h>
@@ -10,8 +8,15 @@
 #include <memory>
 #include <utility>
 
-#include "mw/core/log.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/drm/trace.hpp"
+#include "mw/drm/device.hpp"
+
+using internal::Ok;
+using internal::Err;
+using internal::fmt;
+using internal::Error;
+using internal::unexpected;
 
 // IN_FORMATS blob 的布局定义在 UAPI 头里
 #include <drm_fourcc.h>

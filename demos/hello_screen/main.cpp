@@ -21,13 +21,15 @@
 #include <cstdio>
 #include <string>
 
-#include "mw/core/log.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/display/screen.hpp"
+#include "mw/internal/span.hpp"
 #include "mw/internal/parse_args.hpp"
 #include "mw/internal/signal.hpp"
 #include "mw/version.hpp"
 
 using namespace mw;
+using internal::span;
 using mw::display::Backend;
 using mw::display::Frame;
 using mw::display::Screen;
@@ -48,16 +50,11 @@ void on_signal(int /*signum*/) {
 /// 未知选项静默忽略），而且 --help 和实际支持的选项会慢慢对不上。
 struct Options {
     std::string backend = "offscreen";
-    uint64_t frames = 120;
+    uint64_t frames = 0;
     std::string size = "1280x720";
     std::string device{};
     std::string dump_dir{};
     bool no_pace = false;
-
-    /// `parse_args` **不自带** -h/--help，得自己绑一个。
-    /// 忘了绑的话 `--help` 会以 "Unknown option" 退出码 2 收场 ——
-    /// 能用，但对第一次跑这个程序的人是个很差的第一印象。
-    bool help = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -125,7 +122,7 @@ int run(const Options& options) {
     Screen screen = std::move(screen_result).value();
     LOG_INFO("{}", screen.to_string());
 
-    for (uint64_t i = 0; g_should_stop == 0 && (options.frames == 0 || i < options.frames); ++i) {
+    for (uint64_t i = 0; ((! g_should_stop) && (options.frames == 0 || i < options.frames)); ++i) {
         auto frame = screen.begin_frame();
         if (! frame) {
             log_error_object(frame.error(), "begin_frame");
@@ -177,22 +174,11 @@ int main(int argc, char** argv) {
         .bind(&Options::device,   "-D", "--device",   "KMS device node; empty = auto")
         .bind(&Options::dump_dir, "-o", "--dump-dir", "offscreen: write each frame as PPM here")
         .bind(&Options::no_pace,  "--no-pace",        "offscreen: do not sleep between frames")
-        .bind(&Options::help,     "-h", "--help",     "this text")
         .example("hello_screen -f 120", "offscreen, no privileges needed")
         .example("sudo hello_screen -b kms -f 600", "real scanout")
         .note("The offscreen backend touches no DRM object and validates nothing "
               "about the display path -- see mw/display/screen.hpp.");
 
-    auto parsed = parser.parse(argc, argv);
-    if (parsed && parsed.config.help) {
-        parser.print_help();
-        return 0;
-    }
-    if (! parsed) {
-        std::fprintf(stderr, "error: %s\n", parsed.error->c_str());
-        parser.print_help(std::cerr);
-        return 2;
-    }
-
-    return run(parsed.config);
+    auto config = parser.parse(argc, argv);
+    return run(config);
 }

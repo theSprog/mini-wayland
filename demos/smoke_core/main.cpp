@@ -9,13 +9,18 @@
  */
 #include <cerrno>
 
-#include "mw/core/log.hpp"
-#include "mw/core/unique_fd.hpp"
+#include "mw/internal/error.hpp"
+#include "mw/trace/log.hpp"
+#include "mw/internal/unique_fd.hpp"
 #include "mw/drm/trace.hpp"
 #include "mw/drm/types.hpp"
 
 using namespace mw;
 using namespace mw::drm;
+
+using internal::Ok;
+using internal::Result;
+using internal::UniqueFd;
 
 namespace {
 

@@ -1,4 +1,3 @@
-#include "mw/drm/dump.hpp"
 
 #include <drm_fourcc.h>
 #include <fcntl.h>
@@ -10,11 +9,16 @@
 #include <map>
 #include <vector>
 
-#include "mw/core/log.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/drm/caps.hpp"
+#include "mw/drm/dump.hpp"
 #include "mw/drm/device.hpp"
 #include "mw/drm/property.hpp"
-#include "mw/core/unique_fd.hpp"
+#include "mw/internal/error.hpp"
+#include "mw/internal/unique_fd.hpp"
+
+using internal::Ok;
+using internal::fmt;
 
 namespace mw::drm {
 namespace {

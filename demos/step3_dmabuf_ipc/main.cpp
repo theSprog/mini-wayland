@@ -80,7 +80,8 @@
 #include <string>
 #include <vector>
 
-#include "mw/core/log.hpp"
+#include "mw/internal/error.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/drm/atomic.hpp"
 #include "mw/drm/device.hpp"
 #include "mw/drm/dmabuf_map.hpp"
@@ -98,6 +99,12 @@
 
 using namespace mw;
 using namespace mw::drm;
+
+using internal::Ok;
+using internal::Err;
+using internal::unexpected;
+using internal::sys_err;
+
 
 namespace {
 

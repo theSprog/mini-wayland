@@ -185,7 +185,7 @@ docs/                见下
 
 | 手段 | 位置 | 用途 |
 | --- | --- | --- |
-| 分级日志 + 缩进作用域 | `core/log.hpp` | `MW_LOG=trace` 打出每次 ioctl 的入参 |
+| 分级日志 + 缩进作用域 | `trace/log.hpp` | `MW_LOG=trace` 打出每次 ioctl 的入参 |
 | ioctl 分类计数 | `drm/trace.hpp` | 验证热路径零 ioctl；退出时检查 create/destroy 配平 |
 | 资源拓扑 dump | `drm/dump.hpp` | `probe_kms` 的摘要 / 全量 / IN_FORMATS 自校验 |
 | 不变量自检 | `drm/dump.hpp` | 十几条 PASS/FAIL，比人工比对 modetest 高效 |

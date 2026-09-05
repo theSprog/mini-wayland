@@ -72,7 +72,7 @@
 #  endif
 #endif
 
-#include "mw/core/log.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/drm/atomic.hpp"
 #include "mw/drm/device.hpp"
 #include "mw/drm/event.hpp"
@@ -86,6 +86,10 @@
 
 using namespace mw;
 using namespace mw::drm;
+
+using internal::Ok;
+using internal::Err;
+using internal::unexpected;
 
 namespace {
 

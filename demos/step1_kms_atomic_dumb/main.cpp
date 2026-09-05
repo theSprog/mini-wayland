@@ -45,7 +45,9 @@
 
 #include <drm_fourcc.h>
 
-#include "mw/core/log.hpp"
+#include "mw/internal/error.hpp"
+#include "mw/internal/expected.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/drm/atomic.hpp"
 #include "mw/drm/device.hpp"
 #include "mw/drm/dumb_buffer.hpp"
@@ -54,6 +56,10 @@
 
 using namespace mw;
 using namespace mw::drm;
+
+using internal::Ok;
+using internal::Err;
+using internal::unexpected;
 
 namespace {
 

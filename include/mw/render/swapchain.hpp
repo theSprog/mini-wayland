@@ -45,7 +45,7 @@
 #include <array>
 #include <string>
 
-#include "mw/core/error.hpp"
+#include "mw/internal/error.hpp"
 #include "mw/egl/display.hpp"
 #include "mw/render/buffer_source.hpp"
 #include "mw/render/target.hpp"

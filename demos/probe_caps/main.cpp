@@ -36,7 +36,7 @@
 #include <string>
 #include <vector>
 
-#include "mw/core/log.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/drm/device.hpp"
 #include "mw/drm/prime.hpp"
 #include "mw/render/buffer_source.hpp"

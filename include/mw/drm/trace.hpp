@@ -21,7 +21,7 @@
 #include <cstdint>
 #include <string>
 
-#include "mw/core/log.hpp"
+#include "mw/trace/log.hpp"
 
 namespace mw::drm {
 

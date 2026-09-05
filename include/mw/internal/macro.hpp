@@ -41,7 +41,7 @@
 #define TRY(expr)                                                 \
     ({                                                            \
         auto&& _result = (expr);                                  \
-        if (! _result) return unexpected<Error>(_result.error()); \
+        if (! _result) return internal::unexpected<internal::Error>(_result.error()); \
         std::move(_result).value();                               \
     })
 

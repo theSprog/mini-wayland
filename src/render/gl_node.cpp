@@ -1,5 +1,3 @@
-#include "mw/render/gl_node.hpp"
-
 #include <drm_fourcc.h>
 #include <fcntl.h>
 #include <sys/wait.h>
@@ -11,12 +9,13 @@
 #include <cstring>
 #include <utility>
 
-#include "mw/core/log.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/drm/error.hpp"
 #include "mw/drm/prime.hpp"
 #include "mw/drm/trace.hpp"
 #include "mw/egl/display.hpp"
 #include "mw/gbm/device.hpp"
+#include "mw/render/gl_node.hpp"
 #include "mw/render/buffer_source.hpp"
 
 namespace mw::render {

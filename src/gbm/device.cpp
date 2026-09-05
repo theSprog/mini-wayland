@@ -1,5 +1,3 @@
-#include "mw/gbm/device.hpp"
-
 #include <fcntl.h>
 #include <gbm.h>
 #include <sys/mman.h>
@@ -7,9 +5,13 @@
 #include <cerrno>
 #include <utility>
 
-#include "mw/core/log.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/drm/error.hpp"
 #include "mw/drm/trace.hpp"
+#include "mw/gbm/device.hpp"
+
+using internal::Ok;
+using internal::Err;
 
 namespace mw::gbm {
 

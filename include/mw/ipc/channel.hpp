@@ -31,9 +31,12 @@
  */
 #pragma once
 
-#include "mw/core/error.hpp"
-#include "mw/core/unique_fd.hpp"
+#include "mw/internal/span.hpp"
+#include "mw/internal/error.hpp"
+#include "mw/internal/unique_fd.hpp"
 #include "mw/ipc/wire.hpp"
+
+using internal::span;
 
 namespace mw::ipc {
 

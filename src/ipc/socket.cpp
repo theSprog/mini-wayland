@@ -1,4 +1,3 @@
-#include "mw/ipc/socket.hpp"
 
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -12,8 +11,15 @@
 #include <cstring>
 #include <utility>
 
-#include "mw/core/log.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/ipc/error.hpp"
+#include "mw/ipc/socket.hpp"
+
+using internal::Ok;
+using internal::Err;
+using internal::fmt;
+using internal::sys_err;
+using internal::sys_err_ctx;
 
 namespace mw::ipc {
 namespace {

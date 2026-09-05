@@ -77,7 +77,7 @@
 #include <optional>
 #include <string>
 
-#include "mw/core/error.hpp"
+#include "mw/internal/error.hpp"
 #include "mw/drm/event.hpp"
 #include "mw/drm/types.hpp"
 #include "mw/render/buffer_source.hpp"

@@ -68,11 +68,15 @@
 #include <string>
 #include <unordered_map>
 
-#include "mw/core/error.hpp"
-#include "mw/core/unique_fd.hpp"
+#include "mw/internal/error.hpp"
+#include "mw/internal/unique_fd.hpp"
 #include "mw/drm/error.hpp"
 #include "mw/drm/framebuffer.hpp"
 #include "mw/drm/types.hpp"
+
+using internal::Result;
+using internal::Status;
+using internal::UniqueFd;
 
 namespace mw::drm {
 

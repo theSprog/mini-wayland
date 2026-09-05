@@ -22,8 +22,10 @@
 
 #include <string>
 
-#include "mw/core/error.hpp"
+#include "mw/internal/error.hpp"
 #include "mw/drm/types.hpp"
+
+using internal::Result;
 
 namespace mw::drm {
 

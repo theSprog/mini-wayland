@@ -1,5 +1,3 @@
-#include "mw/render/buffer_source.hpp"
-
 #include <drm_fourcc.h>
 #include <sys/mman.h>
 #include <xf86drm.h>
@@ -7,10 +5,14 @@
 #include <algorithm>
 #include <utility>
 
-#include "mw/core/log.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/drm/dumb_buffer.hpp"
 #include "mw/drm/error.hpp"
 #include "mw/gbm/device.hpp"
+#include "mw/render/buffer_source.hpp"
+
+using internal::Ok;
+using internal::Err;
 
 namespace mw::render {
 

@@ -9,8 +9,16 @@
 #include <cstring>
 #include <utility>
 
-#include "mw/core/log.hpp"
+#include "mw/internal/expected.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/ipc/error.hpp"
+
+using internal::Ok;
+using internal::Err;
+using internal::fmt;
+using internal::unexpected;
+using internal::sys_err;
+using internal::sys_err_ctx;
 
 namespace mw::ipc {
 namespace {

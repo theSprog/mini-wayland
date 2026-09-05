@@ -1,11 +1,13 @@
-#include "mw/ipc/signature.hpp"
-
 #include <array>
 #include <cstring>
 
-#include "mw/core/log.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/ipc/error.hpp"
 #include "mw/ipc/wire.hpp"
+#include "mw/ipc/signature.hpp"
+
+using internal::Ok;
+using internal::Err;
 
 namespace mw::ipc {
 namespace {

@@ -5,9 +5,13 @@
 
 #include <cstring>
 
-#include "mw/core/log.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/drm/property.hpp"
 #include "mw/drm/trace.hpp"
+
+using internal::Ok;
+using internal::Err;
+using internal::fmt;
 
 namespace mw::drm {
 namespace {

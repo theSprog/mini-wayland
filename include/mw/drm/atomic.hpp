@@ -44,12 +44,16 @@
 #include <string>
 #include <vector>
 
-#include "mw/core/error.hpp"
-#include "mw/core/unique_fd.hpp"
+#include "mw/internal/error.hpp"
+#include "mw/internal/span.hpp"
+#include "mw/internal/unique_fd.hpp"
 #include "mw/drm/error.hpp"
 #include "mw/drm/types.hpp"
 
 namespace mw::drm {
+using internal::BorrowedFd;
+using internal::Status;
+using internal::span;
 
 struct Connector;
 struct Crtc;

@@ -8,8 +8,13 @@
 #include <cstring>
 #include <utility>
 
-#include "mw/core/log.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/drm/trace.hpp"
+
+using internal::Ok;
+using internal::Err;
+using internal::fmt;
+using internal::sys_err;
 
 namespace mw::drm {
 

@@ -150,4 +150,76 @@ using Result = expected<T, Error>;
 
 using Status = expected<void, Error>;
 
+inline constexpr const char* kSysDomain = "errno";
+
+struct SysError final : IError {
+    explicit SysError(int err) noexcept : err_(err), msg_() {
+        // strerror_r 的 GNU 版本返回 char*，可能不写进 buf_。
+        char buf[128];
+        const char* text = ::strerror_r(err, buf, sizeof(buf));
+        msg_ = text != nullptr ? text : "unknown error";
+    }
+
+    int error_code() const noexcept override {
+        return err_;
+    }
+
+    const char* error_message() const noexcept override {
+        return msg_.c_str();
+    }
+
+    const char* error_domain() const noexcept override {
+        return kSysDomain;
+    }
+
+  private:
+    int err_;
+    std::string msg_;
+};
+
+// SourceLocation 是 3 个指针 + 一个 int 的 POD，按值传比 const& 更便宜，
+// 而且默认实参 SourceLocation::current() 必须在调用点求值。
+// cppcheck-suppress passedByValue
+inline unexpected<Error> sys_err(const char* what, int err = errno, SourceLocation loc = SourceLocation::current()) {
+    std::string msg;
+    msg.reserve(64);
+    msg += what;
+    msg += ": ";
+    {
+        const SysError se(err);
+        msg += se.error_message();
+    }
+    msg += " (errno=";
+    msg += std::to_string(err);
+    msg += ")";
+    return unexpected<Error>(Error(kSysDomain, err, std::move(msg), loc));
+}
+
+inline unexpected<Error> sys_err_ctx(const char* what, std::string_view context, int err = errno,
+                              // cppcheck-suppress passedByValue
+                              SourceLocation loc = SourceLocation::current()) {
+    std::string msg;
+    msg.reserve(96);
+    msg += what;
+    msg += "('";
+    msg.append(context.data(), context.size());
+    msg += "'): ";
+    {
+        const SysError se(err);
+        msg += se.error_message();
+    }
+    msg += " (errno=";
+    msg += std::to_string(err);
+    msg += ")";
+    return unexpected<Error>(Error(kSysDomain, err, std::move(msg), loc));
+}
+
+inline bool is_errno(const Error& e, int errno_value) noexcept {
+    return e.in_domain(kSysDomain) && e.code == errno_value;
+}
+
+inline int errno_of(const Error& e) noexcept {
+    return e.in_domain(kSysDomain) ? e.code : 0;
+}
+
 } // namespace internal

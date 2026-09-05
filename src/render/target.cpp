@@ -8,8 +8,11 @@
 #include <type_traits>
 #include <utility>
 
-#include "mw/core/log.hpp"
+#include "mw/trace/log.hpp"
 #include "mw/drm/error.hpp"
+
+using internal::Ok;
+using internal::Err;
 
 namespace mw::render {
 

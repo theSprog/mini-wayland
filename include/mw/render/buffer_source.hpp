@@ -68,10 +68,13 @@
 #include <string>
 #include <vector>
 
-#include "mw/core/error.hpp"
+#include "mw/internal/span.hpp"
+#include "mw/internal/error.hpp"
 #include "mw/drm/framebuffer.hpp"
 #include "mw/drm/prime.hpp"
 #include "mw/drm/types.hpp"
+
+using internal::span;
 
 namespace mw::render {
 
