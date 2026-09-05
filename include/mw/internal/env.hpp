@@ -10,7 +10,7 @@
 
 namespace internal {
 namespace env {
-static inline bool iequals(std::string_view lhs, std::string_view rhs) noexcept {
+inline bool iequals(std::string_view lhs, std::string_view rhs) noexcept {
     if (lhs.size() != rhs.size()) {
         return false;
     }
@@ -23,7 +23,7 @@ static inline bool iequals(std::string_view lhs, std::string_view rhs) noexcept 
     return true;
 }
 
-static inline bool parse_bool(std::string_view sv, bool& out) noexcept {
+inline bool parse_bool(std::string_view sv, bool& out) noexcept {
     if (sv == "1" || iequals(sv, "true") || iequals(sv, "yes") || iequals(sv, "on")) {
         out = true;
         return true;
@@ -36,7 +36,7 @@ static inline bool parse_bool(std::string_view sv, bool& out) noexcept {
 }
 
 template <typename T>
-static inline bool parse_value(std::string_view sv, T& out) {
+inline bool parse_value(std::string_view sv, T& out) {
     using Decayed = std::decay_t<T>;
 
     if constexpr (std::is_same_v<Decayed, std::string>) {

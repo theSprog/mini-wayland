@@ -80,7 +80,7 @@ bool from_string_impl(std::string_view sv, T& out) {
     }
 }
 
-static inline std::string extract_basename(std::string_view path) {
+inline std::string extract_basename(std::string_view path) {
     auto pos = path.find_last_of("/\\");
     if (pos == std::string_view::npos) {
         return std::string(path);
